@@ -11,8 +11,6 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const cleanName = (s) => String(s || '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 12);
 
 // seat positions (percent of table box) by position relative to the viewer (0 = bottom / me), clockwise
-const POS = [[50, 89], [15, 75], [13, 47], [17, 19], [50, 8], [83, 19], [87, 47], [85, 75]];
-const CENTER = [50, 45];
 
 function getToken() {
   let t = sessionStorage.getItem('holdem.token');
@@ -360,21 +358,117 @@ function setSitOut(v) {
 }
 
 // ---------------- rendering ----------------
-function cardHTML(c, cls = '') {
-  if (c === null || c === undefined) return `<div class="card back ${cls}"></div>`;
-  const r = RANKS[c >> 2]; const s = c & 3;
-  return `<div class="card s${s} ${cls}"><span class="r">${r === 'T' ? '10' : r}</span><span class="s">${SUIT_SYMBOLS[s]}</span></div>`;
+const RING_C = 2 * Math.PI * 26;   // seat countdown ring (viewBox 56, r 26)
+const CLOCK_C = 2 * Math.PI * 19;  // my countdown (viewBox 44, r 19)
+const BETTING = ['preflop', 'flop', 'turn', 'river'];
+// seat anchor points (% of table box) by position relative to the viewer (0 = me at the bottom), clockwise
+const POS_P = [[50, 86], [11, 69], [9, 44], [15, 19], [50, 10.5], [85, 19], [91, 44], [89, 69]];
+const POS_L = [[50, 85], [21, 80], [8, 50], [21, 19], [50, 12], [79, 19], [92, 50], [79, 80]];
+const CENTER_PT = [50, 45];
+const POT_PT_P = [50, 31];
+const POT_PT_L = [50, 29];
+let POT_PT = POT_PT_P;
+let landscape = false;
+const posOf = (seat) => {
+  const base = S.mySeat >= 0 ? S.mySeat : 0;
+  return (landscape ? POS_L : POS_P)[(seat - base + MAX_SEATS) % MAX_SEATS];
+};
+const toward = (a, b, f) => [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+// portrait: hand-placed bet spots so chips never cover the board
+const BET_P = [[41, 72], [26, 62], [19, 57], [27, 29], [50, 21], [73, 29], [81, 57], [74, 62]];
+const betPt = (seat) => {
+  if (landscape) return toward(posOf(seat), CENTER_PT, 0.36);
+  const base = S.mySeat >= 0 ? S.mySeat : 0;
+  return BET_P[(seat - base + MAX_SEATS) % MAX_SEATS];
+};
+function dealerPt(seat) {
+  const p = posOf(seat);
+  const [x, y] = toward(p, CENTER_PT, 0.25);
+  const dx = CENTER_PT[0] - p[0], dy = CENTER_PT[1] - p[1];
+  const len = Math.hypot(dx, dy) || 1;
+  return [x - (dy / len) * 7, y + (dx / len) * 5];
 }
 
-let prevBoardLen = 0;
+// ---- animation bookkeeping: an animation keeps running smoothly across re-renders ----
+const animT = new Map();
+let animHand = -1;
+function anim(key, cls, dur, delay = 0) {
+  const now = performance.now();
+  if (!animT.has(key)) animT.set(key, now);
+  const el = now - animT.get(key);
+  if (el > dur + delay) return { cls: '', style: '' };
+  return { cls, style: `animation-delay:${Math.round(delay - el)}ms;` };
+}
+
+// ---- cards ----
+function cardHTML(c, cls = '', style = '') {
+  if (c === null || c === undefined) return `<div class="card back ${cls}" style="${style}"></div>`;
+  const r = RANKS[c >> 2]; const s = c & 3;
+  const rank = r === 'T' ? '10' : r;
+  const sym = SUIT_SYMBOLS[s];
+  const face = 'JQK'.includes(r);
+  const big = cls.includes('big');
+  return `<div class="card s${s} ${cls}" style="${style}"><span class="ci"><b>${rank}</b><i>${sym}</i></span>` +
+    `<span class="cc${face && !big ? ' face' : ''}">${face && !big ? r : sym}</span>` +
+    (big ? `<span class="ci2"><b>${rank}</b><i>${sym}</i></span>` : '') + '</div>';
+}
+
+// ---- chips ----
+const DENOMS = [100000, 25000, 5000, 1000, 500, 100];
+function chipList(amount, max = 6) {
+  const out = [];
+  let rest = amount;
+  for (const d of DENOMS) {
+    let n = Math.floor(rest / d);
+    rest -= n * d;
+    while (n-- > 0 && out.length < max) out.push(d);
+  }
+  if (!out.length && amount > 0) out.push(100);
+  return out;
+}
+const stackHTML = (amount, max = 6) => `<div class="stack">${chipList(amount, max).reverse().map((d) => `<i class="chip-d d${d}"></i>`).join('')}</div>`;
+function potStacksHTML(amount) {
+  const groups = [];
+  let rest = amount;
+  for (const d of DENOMS) {
+    const n = Math.floor(rest / d);
+    rest -= n * d;
+    if (n > 0) groups.push([d, Math.min(n, 6)]);
+  }
+  return groups.slice(0, 4).map(([d, n]) => `<div class="stack">${`<i class="chip-d d${d}"></i>`.repeat(n)}</div>`).join('');
+}
+
+// ---- avatars ----
+const BOT_EMOJI = { '粉哥': '🌸', 'Micheal': '🎩', 'Grok Bot': '🤖', '小龙': '🐲', '阿杰': '🦊', 'Lucy': '🐱', '老王': '🐼', '阿May': '🦄' };
+const PALETTE = [['#ff9e9e', '#c62828'], ['#9ec2ff', '#1e4fb8'], ['#9ff0c2', '#14804a'], ['#ffe08a', '#b57f00'], ['#e6a3ff', '#7b1fa2'],
+  ['#8ff3f3', '#00796b'], ['#ffc78a', '#d84315'], ['#c5d0d6', '#455a64']];
+function avatarOf(p) {
+  if (p.name === '粉哥') return { c1: '#ffc2dc', c2: '#d81b60', t: '🌸' };
+  let h = 0;
+  for (const ch of p.name) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  const [c1, c2] = PALETTE[h % PALETTE.length];
+  const t = p.isBot ? (BOT_EMOJI[p.name] || '🤖') : esc([...p.name][0].toUpperCase());
+  return { c1, c2, t };
+}
+function pillKind(t) {
+  if (!t) return '';
+  if (t.startsWith('弃牌')) return 'fold';
+  if (t.startsWith('过牌')) return 'check';
+  if (t.startsWith('跟注')) return 'call';
+  if (t.startsWith('全下')) return 'allin';
+  if (t.startsWith('下注') || t.startsWith('加注')) return 'raise';
+  if (t.includes('盲')) return 'blind';
+  return 'status';
+}
+
 function setView(v) {
-  const prevHand = S.view ? S.view.handNo : -1;
+  const prev = S.view;
   S.view = v;
   S.deadline = v.turnRemainingMs ? Date.now() + v.turnRemainingMs : 0;
   S.pending = false;
-  if (v.handNo !== prevHand) prevBoardLen = 0;
+  if (v.handNo !== animHand) { animT.clear(); animHand = v.handNo; }
   render();
-  // notify when it's my turn
+  spawnFx(prev, v);
   const turnKey = `${v.handNo}-${v.phase}-${v.toAct}-${v.currentBet}`;
   if (v.toAct === S.mySeat && S.mySeat >= 0 && turnKey !== S.lastTurnKey) {
     if (navigator.vibrate) { try { navigator.vibrate(80); } catch (e) { /* */ } }
@@ -387,8 +481,12 @@ function setView(v) {
 function render() {
   const v = S.view;
   if (!v) return;
+  const t = $('#table');
+  landscape = t.clientWidth / Math.max(1, t.clientHeight) > 1.25;
+  POT_PT = landscape ? POT_PT_L : POT_PT_P;
+  t.classList.toggle('landscape', landscape);
   const isHost = S.mode !== 'client';
-  $('#room-label').textContent = S.mode === 'solo' ? '单机练习' : `房间 ${S.code || ''}${isHost ? '（房主）' : ''}`;
+  $('#room-label').textContent = S.mode === 'solo' ? '单机练习 · 对战 AI' : `房间 ${S.code || ''}${isHost ? ' · 房主' : ''}`;
   $('#blind-label').textContent = `盲注 ${fmt(v.sb)}/${fmt(v.bb)}${v.pendingBlinds ? `（下手 ${fmt(v.pendingBlinds.sb)}/${fmt(v.pendingBlinds.bb)}）` : ''} · 第 ${v.handNo} 手`;
   $('#btn-invite').classList.toggle('hidden', S.mode === 'solo');
   renderNetDot();
@@ -399,74 +497,99 @@ function render() {
 }
 
 function renderSeats(v, isHost) {
-  const base = S.mySeat >= 0 ? S.mySeat : 0;
   const winners = new Map();
   if (v.phase === 'handover' && v.result) for (const w of v.result.winners) winners.set(w.seat, w.amount);
-  const betting = ['preflop', 'flop', 'turn', 'river'].includes(v.phase);
+  const betting = BETTING.includes(v.phase);
+  const tw = $('#table').clientWidth, th = $('#table').clientHeight;
   let html = '';
+  let dealOrder = 0;
   for (let i = 0; i < MAX_SEATS; i++) {
-    const rel = (i - base + MAX_SEATS) % MAX_SEATS;
-    const [x, y] = POS[rel];
+    const [x, y] = posOf(i);
     const p = v.seats[i];
     if (!p) {
-      const canAdd = isHost;
-      html += `<div class="seat empty ${canAdd ? 'can-add' : ''}" data-empty="${i}" style="left:${x}%;top:${y}%"><div class="hole"></div><div class="box">${canAdd ? '＋ 添加AI' : '空位'}</div></div>`;
+      html += `<div class="seat empty ${isHost ? 'can-add' : ''}" data-empty="${i}" style="left:${x}%;top:${y}%">
+        <div class="avatar-wrap"><div class="avatar">${isHost ? '＋' : ''}</div></div>
+        <div class="plate"><div class="name">${isHost ? '添加 AI' : '空位'}</div><div class="chips">&nbsp;</div></div></div>`;
       continue;
     }
     const me = i === S.mySeat;
     const active = v.toAct === i;
     const out = !p.inHand && p.chips === 0;
-    const cls = ['seat', me && 'me', active && 'active', p.inHand && p.folded && 'folded', (out || p.sittingOut || !p.connected) && 'out', winners.has(i) && 'winner'].filter(Boolean).join(' ');
+    const isWin = winners.has(i);
+    const side = y < 30 ? (x <= 50 && x > 30 ? 'top tl' : x <= 30 ? 'top tr' : 'top tl') : '';
+    const cls = ['seat', side, me && 'me', active && 'active', p.inHand && p.folded && 'folded', (out || p.sittingOut || !p.connected) && 'out', isWin && 'winner'].filter(Boolean).join(' ');
     let hole = '';
     if (p.hasCards && !me) {
-      if (p.cards) hole = `<div class="hole revealed">${p.cards.map((c) => cardHTML(c)).join('')}</div>`;
-      else if (!p.folded) hole = `<div class="hole">${cardHTML(null)}${cardHTML(null)}</div>`;
-      else hole = '<div class="hole"></div>';
-    } else hole = '<div class="hole"></div>';
-    let tag = p.lastAction || '';
-    if (!p.connected) tag = '📴 离线';
-    else if (p.sittingOut) tag = '暂离';
-    else if (out) tag = '出局 💸';
-    if (winners.has(i)) tag = `赢 +${fmt(winners.get(i))}`;
-    const badges = [
-      v.button === i && (betting || v.phase === 'handover') ? '<span class="badge">D</span>' : '',
-    ].join('');
-    html += `<div class="${cls}" style="left:${x}%;top:${y}%">${hole}<div class="box">${badges}
-      <div class="name">${p.isBot ? '🤖' : ''}${esc(p.name)}${me ? '（我）' : ''}</div>
-      <div class="chips">${fmt(p.chips)}</div>
-      ${p.handName ? `<div class="hand-name">${esc(p.handName)}</div>` : `<div class="tag">${esc(tag)}</div>`}
-      ${active ? '<div class="timer"><i></i></div>' : ''}
-    </div></div>`;
-    if (p.bet > 0) {
-      const bx = x + (CENTER[0] - x) * 0.42, by = y + (CENTER[1] - y) * 0.42;
-      html += `<div class="bet-chip" style="left:${bx}%;top:${by}%">${fmt(p.bet)}</div>`;
+      if (p.cards) {
+        const a = anim(`rev-${i}`, 'flip', 450);
+        hole = `<div class="hole revealed">${p.cards.map((c, k) => cardHTML(c, a.cls, a.style.replace(/(-?\d+)ms/, (m, n) => `${Number(n) + k * 90}ms`))).join('')}</div>`;
+      } else if (!p.folded) {
+        const dx = Math.round(((CENTER_PT[0] - x) / 100) * tw), dy = Math.round(((CENTER_PT[1] - y) / 100) * th);
+        const order = dealOrder++;
+        hole = `<div class="hole">${[0, 1].map((k) => {
+          const a = anim(`deal-${i}-${k}`, 'deal', 450, order * 45 + k * 260);
+          return cardHTML(null, a.cls, `--dx:${dx}px;--dy:${dy}px;${a.style}`);
+        }).join('')}</div>`;
+      }
     }
+    let tag = p.lastAction || '';
+    let kind = pillKind(tag);
+    if (!p.connected) { tag = '📴 离线'; kind = 'status'; } else if (p.sittingOut) { tag = '暂离'; kind = 'status'; } else if (out) { tag = '出局'; kind = 'status'; }
+    if (p.handName) { tag = p.handName; kind = 'hand'; }
+    const av = avatarOf(p);
+    html += `<div class="${cls}" style="left:${x}%;top:${y}%">${hole}
+      <div class="avatar-wrap">
+        <svg class="ring" viewBox="0 0 56 56"><circle class="bg" cx="28" cy="28" r="26"/><circle class="fg" cx="28" cy="28" r="26" stroke-dasharray="${RING_C.toFixed(2)}" stroke-dashoffset="0"/></svg>
+        <div class="avatar" style="--c1:${av.c1};--c2:${av.c2}">${av.t}</div>
+        ${isWin ? '<div class="crown">👑</div>' : ''}
+      </div>
+      <div class="plate"><div class="name">${esc(p.name)}${me ? '（我）' : ''}</div><div class="chips">${fmt(p.chips)}</div></div>
+      <div class="pill ${kind}">${esc(tag)}</div>
+      ${isWin ? `<div class="win-pop">+${fmt(winners.get(i))}</div>` : ''}
+    </div>`;
+    if (p.bet > 0) {
+      const [bx, by] = betPt(i);
+      const a = anim(`bet-${i}-${p.bet}`, '', 300);
+      html += `<div class="bet" style="left:${bx}%;top:${by}%;${a.style ? a.style : 'animation:none;'}">${stackHTML(p.bet, 5)}<span class="amt">${fmt(p.bet)}</span></div>`;
+    }
+  }
+  if (v.button >= 0 && v.seats[v.button] && (betting || v.phase === 'handover')) {
+    const [dx, dy] = dealerPt(v.button);
+    html += `<div class="dealer" style="left:${dx}%;top:${dy}%">D</div>`;
   }
   const seatsEl = $('#seats');
   seatsEl.innerHTML = html;
-  seatsEl.querySelectorAll('.seat.empty.can-add').forEach((el) => {
-    el.onclick = () => { S.ctrl.addBot(); };
-  });
+  seatsEl.querySelectorAll('.seat.empty.can-add').forEach((el) => { el.onclick = () => { S.ctrl.addBot(); }; });
   updateTimers();
 }
 
 function renderCenter(v, isHost) {
   const board = [];
   for (let i = 0; i < 5; i++) {
-    if (i < v.board.length) board.push(cardHTML(v.board[i], i >= prevBoardLen ? 'deal' : ''));
-    else board.push('<div class="card slot"></div>');
+    if (i < v.board.length) {
+      const stagger = i < 3 ? i * 140 : 0;
+      const a = anim(`board-${i}`, 'flip', 450, stagger);
+      board.push(cardHTML(v.board[i], a.cls, a.style));
+    } else board.push('<div class="card slot"></div>');
   }
-  prevBoardLen = v.board.length;
   $('#board').innerHTML = board.join('');
-  const betting = ['preflop', 'flop', 'turn', 'river'].includes(v.phase);
-  $('#pot').textContent = betting && v.potTotal > 0 ? `底池 ${fmt(v.potTotal)}` : '';
+  const betting = BETTING.includes(v.phase);
+  const pot = $('#pot');
+  pot.style.left = POT_PT[0] + '%';
+  pot.style.top = POT_PT[1] + '%';
+  pot.innerHTML = betting && v.potTotal > 0
+    ? `<div class="stacks">${potStacksHTML(v.pot || v.potTotal)}</div><span class="amt"><span class="lbl">底池</span>${fmt(v.potTotal)}</span>`
+    : '';
   let msg = '';
   if (v.phase === 'handover' && v.result) {
-    msg = v.result.pots.filter((pt) => !pt.uncalled || v.result.pots.length === 1).map((pt, idx, arr) => {
+    const pots = v.result.pots.filter((pt) => !pt.uncalled || v.result.pots.length === 1);
+    const best = pots.find((pt) => pt.handName);
+    const lines = pots.map((pt, idx, arr) => {
       const names = pt.winners.map((s) => (v.seats[s] ? esc(v.seats[s].name) : '?')).join('、');
       const label = arr.length > 1 ? (idx === 0 ? '主池' : `边池${idx}`) : '';
-      return `<div class="win-line">${names} ${pt.winners.length > 1 ? '平分' : '赢得'}${label} ${fmt(pt.amount)}${pt.handName ? ' · ' + esc(pt.handName) : ''}</div>`;
+      return `<div class="wl">${names} ${pt.winners.length > 1 ? '平分' : '赢得'}${label} ${fmt(pt.amount)}</div>`;
     }).join('');
+    msg = `<div class="win-banner">${lines}<div class="hn">${best ? esc(best.handName) : '其他人弃牌'}</div></div>`;
   }
   if (!betting) {
     const eligible = v.seats.filter((p) => p && p.chips > 0 && !p.sittingOut && p.connected).length;
@@ -474,17 +597,39 @@ function renderCenter(v, isHost) {
       if (isHost) {
         msg += eligible >= 2
           ? `<div>${S.mode === 'host' ? '朋友到齐后点击开始' : ''}</div><button class="btn primary" id="btn-start">▶ 开始游戏</button>`
-          : `<div>至少需要 2 名玩家 · 点空位添加 AI 或邀请朋友</div>`;
+          : '<div>至少需要 2 名玩家 · 点空位添加 AI 或邀请朋友</div>';
       } else msg += '<div>等待房主开始游戏…</div>';
     } else if (eligible < 2) {
       msg += `<div>等待更多有筹码的玩家…${isHost ? '（可在菜单中补码或添加 AI）' : ''}</div>`;
-    } else if (v.phase === 'handover') {
-      msg += '<div class="muted small">下一手即将开始…</div>';
     }
   }
   $('#center-msg').innerHTML = msg;
   const bs = $('#btn-start');
   if (bs) bs.onclick = () => S.ctrl.start();
+}
+
+// chips flying: bets -> pot at the end of a street, pot -> winners at the end of the hand
+function spawnFx(prev, v) {
+  if (!prev || prev.handNo !== v.handNo) return;
+  const fx = $('#fx');
+  const fly = (from, to, amount, delay = 0) => {
+    const g = document.createElement('div');
+    g.className = 'ghost';
+    g.innerHTML = stackHTML(amount, 5);
+    g.style.left = from[0] + '%'; g.style.top = from[1] + '%';
+    fx.appendChild(g);
+    setTimeout(() => requestAnimationFrame(() => { g.style.left = to[0] + '%'; g.style.top = to[1] + '%'; g.style.opacity = '0'; }), 30 + delay);
+    setTimeout(() => g.remove(), 1200 + delay);
+  };
+  if (prev.phase !== v.phase) {
+    for (let i = 0; i < MAX_SEATS; i++) {
+      const a = prev.seats[i], b = v.seats[i];
+      if (a && a.bet > 0 && (!b || b.bet === 0)) fly(betPt(i), POT_PT, a.bet);
+    }
+  }
+  if (BETTING.includes(prev.phase) && v.phase === 'handover' && v.result) {
+    for (const w of v.result.winners) if (v.seats[w.seat]) fly(POT_PT, posOf(w.seat), w.amount, 550);
+  }
 }
 
 function myHandText(v, me) {
@@ -499,34 +644,38 @@ function renderActionBar(v, isHost) {
   const bar = $('#action-bar');
   const me = S.mySeat >= 0 ? v.seats[S.mySeat] : null;
   const la = v.legal;
-  const key = `${v.handNo}|${v.phase}|${v.toAct}|${v.currentBet}|${la ? la.minRaiseTo + '-' + la.maxRaiseTo : ''}|${me ? me.chips + '-' + me.sittingOut + '-' + me.inHand + '-' + (me.cards || []).join(',') : ''}|${v.board.length}|${v.running}`;
+  const key = `${v.handNo}|${v.phase}|${v.toAct}|${v.currentBet}|${la ? la.minRaiseTo + '-' + la.maxRaiseTo : ''}|${me ? me.chips + '-' + me.sittingOut + '-' + me.inHand + '-' + me.folded + '-' + (me.cards || []).join(',') : ''}|${v.board.length}|${v.running}`;
   if (key === S.actionKey && bar.innerHTML) { updateTimers(); return; }
   S.actionKey = key;
   if (!me) { bar.innerHTML = '<div class="waiting">观战中</div>'; return; }
 
   const cards = me.cards && me.inHand
-    ? me.cards.map((c) => cardHTML(c, 'big' + (me.folded ? ' dim' : ''))).join('')
+    ? me.cards.map((c, k) => { const a = anim(`my-${k}`, 'deal', 450, k * 260); return cardHTML(c, 'big ' + a.cls + (me.folded ? ' dim' : ''), a.style); }).join('')
     : '<div class="card slot big"></div><div class="card slot big"></div>';
   const hn = me.inHand && !me.folded ? myHandText(v, me) : '';
-  let info = `<div>筹码 <b>${fmt(me.chips)}</b>${me.bet ? ` · 本轮已下 ${fmt(me.bet)}` : ''}</div>`;
+  let info = `<div>筹码 <b>${fmt(me.chips)}</b>${me.bet ? ` <span class="muted">· 已下 ${fmt(me.bet)}</span>` : ''}</div>`;
   if (hn) info += `<div class="hn">${esc(hn)}</div>`;
   else if (me.inHand && me.folded) info += '<div class="muted">已弃牌</div>';
-  let html = `<div class="my-row"><div class="my-cards">${cards}</div><div class="my-info">${info}</div><div class="turn-clock" id="my-clock"></div></div>`;
+  const clock = `<div class="turn-clock idle" id="my-clock"><svg viewBox="0 0 44 44"><circle class="bg" cx="22" cy="22" r="19"/><circle class="fg" cx="22" cy="22" r="19" stroke-dasharray="${CLOCK_C.toFixed(2)}" stroke-dashoffset="0"/></svg><span></span></div>`;
+  let html = `<div class="my-row"><div class="my-cards">${cards}</div><div class="my-info">${info}</div>${clock}</div>`;
 
   if (la) {
-    const callTxt = la.canCheck ? '过牌' : (la.callAmount >= me.chips ? `全下 ${fmt(la.callAmount)}` : `跟注 ${fmt(la.callAmount)}`);
+    const allinCall = !la.canCheck && la.callAmount >= me.chips;
+    const callBtn = la.canCheck
+      ? '<button class="btn act-check" data-act="check">过牌</button>'
+      : `<button class="btn act-call" data-act="call">${allinCall ? '全下' : '跟注'}<small>${fmt(la.callAmount)}</small></button>`;
     html += `<div class="actions">
-      <button class="btn danger" data-act="fold">弃牌</button>
-      <button class="btn green" data-act="${la.canCheck ? 'check' : 'call'}">${callTxt}</button>
-      ${la.canRaise ? `<button class="btn primary" data-act="raise" id="btn-raise"></button>` : ''}
+      <button class="btn act-fold" data-act="fold">弃牌</button>
+      ${callBtn}
+      ${la.canRaise ? '<button class="btn act-raise" data-act="raise" id="btn-raise"></button>' : ''}
     </div>`;
     if (la.canRaise) {
       html += `<div class="raise-row">
         <div class="quick">
           <button class="btn" data-q="min">最小</button>
-          <button class="btn" data-q="0.5">½池</button>
-          <button class="btn" data-q="0.75">¾池</button>
-          <button class="btn" data-q="1">1倍池</button>
+          <button class="btn" data-q="0.5">½ 池</button>
+          <button class="btn" data-q="0.75">¾ 池</button>
+          <button class="btn" data-q="1">1 倍池</button>
           <button class="btn" data-q="max">全下</button>
         </div>
         <div class="slider-row">
@@ -536,14 +685,14 @@ function renderActionBar(v, isHost) {
       </div>`;
     }
   } else if (me.sittingOut) {
-    html += `<div class="actions"><button class="btn green" id="btn-back">我回来了（回到座位）</button></div>`;
+    html += '<div class="actions"><button class="btn green" id="btn-back">我回来了（回到座位）</button></div>';
   } else if (!me.inHand && me.chips === 0) {
     html += isHost
       ? `<div class="actions"><button class="btn primary" id="btn-rebuy">补码到 ${fmt(STARTING_CHIPS)}</button></div>`
       : '<div class="waiting">筹码输光了，请房主在菜单里为你补码</div>';
   } else {
-    const t = v.toAct >= 0 && v.seats[v.toAct] ? `等待 ${esc(v.seats[v.toAct].name)} 行动…` : (v.phase === 'handover' ? '本手结束' : (v.runout ? '发牌中…' : ''));
-    html += `<div class="waiting">${t}${me.inHand ? '' : (['preflop', 'flop', 'turn', 'river'].includes(v.phase) ? '（下一手加入）' : '')}</div>`;
+    const t = v.toAct >= 0 && v.seats[v.toAct] ? `等待 ${esc(v.seats[v.toAct].name)} 行动…` : (v.phase === 'handover' ? '本手结束，下一手即将开始…' : (v.runout ? '发牌中…' : ''));
+    html += `<div class="waiting">${t}${me.inHand ? '' : (BETTING.includes(v.phase) ? '（下一手加入）' : '')}</div>`;
   }
   bar.innerHTML = html;
 
@@ -571,8 +720,10 @@ function setupRaise(v, la) {
     S.raiseValue = x;
     if (!fromInput) input.value = x;
     slider.value = x;
+    const span = la.maxRaiseTo - la.minRaiseTo;
+    slider.style.setProperty('--fill', (span > 0 ? ((x - la.minRaiseTo) / span) * 100 : 100) + '%');
     const allin = x >= la.maxRaiseTo;
-    btn.textContent = allin ? `全下 ${fmt(x)}` : `${la.isBet ? '下注' : '加注到'} ${fmt(x)}`;
+    btn.innerHTML = allin ? `全下<small>${fmt(x)}</small>` : `${la.isBet ? '下注' : '加注到'}<small>${fmt(x)}</small>`;
   };
   slider.oninput = () => {
     let x = Number(slider.value);
@@ -597,18 +748,24 @@ function updateTimers() {
   const v = S.view;
   if (!v) return;
   const left = S.deadline ? Math.max(0, S.deadline - Date.now()) : 0;
-  const pct = v.turnTotalMs ? (left / v.turnTotalMs) * 100 : 0;
-  document.querySelectorAll('.seat.active .timer i').forEach((i) => { i.style.width = pct + '%'; });
+  const frac = v.turnTotalMs && S.deadline ? left / v.turnTotalMs : 1;
+  document.querySelectorAll('.seat.active .ring .fg').forEach((c) => {
+    c.setAttribute('stroke-dashoffset', (RING_C * (1 - frac)).toFixed(2));
+    c.classList.toggle('urgent', S.deadline && frac < 0.3);
+  });
   const clock = $('#my-clock');
   if (clock) {
     if (v.toAct === S.mySeat && S.deadline) {
       const s = Math.ceil(left / 1000);
-      clock.textContent = s + 's';
+      clock.classList.remove('idle');
+      clock.querySelector('span').textContent = s;
+      clock.querySelector('.fg').setAttribute('stroke-dashoffset', (CLOCK_C * (1 - frac)).toFixed(2));
       clock.classList.toggle('urgent', s <= 8);
-    } else clock.textContent = '';
+    } else clock.classList.add('idle');
   }
 }
 setInterval(updateTimers, 250);
+if (window.ResizeObserver) new ResizeObserver(() => { if (S.view) render(); }).observe(document.querySelector('#table-wrap'));
 
 let lastLogId = 0;
 function renderLog(v) {

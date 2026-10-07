@@ -8,14 +8,22 @@
 <title>德州扑克 · 朋友局</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%99%A0%EF%B8%8F%3C/text%3E%3C/svg%3E">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="css/style.css?v=2">
 </head>
 <body>
 <!-- ============ 大厅 Lobby ============ -->
 <main id="lobby" class="screen">
   <div class="lobby-inner">
-    <h1 class="logo">♠ 德州扑克 <small>朋友局</small></h1>
-    <p class="subtitle">无限注德州扑克 · 每人 <b>100,000</b> 虚拟筹码<br><span class="muted">仅供娱乐，筹码无任何价值，不涉及真钱</span></p>
+    <div class="hero">
+      <div class="hero-cards" aria-hidden="true">
+        <div class="card hero-c c1 s0"><span class="ci"><b>A</b><i>♠</i></span><span class="cc">♠</span></div>
+        <div class="card hero-c c2 s1"><span class="ci"><b>K</b><i>♥</i></span><span class="cc face">K</span></div>
+        <div class="card hero-c c3 s2"><span class="ci"><b>Q</b><i>♦</i></span><span class="cc face">Q</span></div>
+      </div>
+      <div class="hero-chips" aria-hidden="true"><i class="chip-d d1000"></i><i class="chip-d d5000"></i><i class="chip-d d25000"></i></div>
+      <h1 class="logo"><span class="logo-main">德州扑克</span><span class="logo-sub">HOLD'EM · 朋友局</span></h1>
+      <p class="subtitle">无限注德州扑克 · 每人 <b>100,000</b> 虚拟筹码<br><span class="muted">仅供娱乐 · 筹码无任何价值 · 不涉及真钱</span></p>
+    </div>
 
     <label class="field">
       <span>你的昵称</span>
@@ -23,30 +31,30 @@
     </label>
 
     <section class="card-panel" id="join-panel">
-      <h2>加入朋友的房间</h2>
+      <h2><span class="ic">🔗</span>加入朋友的房间</h2>
       <div class="row">
-        <input id="join-code" maxlength="8" placeholder="房间码，如 K7Q2M" autocapitalize="characters" autocomplete="off">
+        <input id="join-code" class="code-input" maxlength="8" placeholder="房间码，如 K7Q2M" autocapitalize="characters" autocomplete="off">
         <button id="btn-join" class="btn primary">加入</button>
       </div>
     </section>
 
     <section class="card-panel">
-      <h2>创建房间（我当房主）</h2>
+      <h2><span class="ic">👑</span>创建房间（我当房主）</h2>
       <p class="muted small">创建后把链接发到微信群，朋友点开即可加入。房主的浏览器负责发牌，请保持页面打开。</p>
       <button id="btn-host" class="btn primary wide">创建房间</button>
     </section>
 
     <section class="card-panel">
-      <h2>单机练习（对战 AI）</h2>
+      <h2><span class="ic">🤖</span>单机练习（对战 AI）</h2>
       <div class="row">
         <label class="inline">AI 数量
           <select id="solo-bots">
             <option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option><option>7</option>
           </select>
         </label>
-        <button id="btn-solo" class="btn">开始单机</button>
+        <button id="btn-solo" class="btn green">开始单机</button>
       </div>
-      <p class="muted small">AI：粉哥（松凶）、Micheal（紧）、Grok Bot（平衡）……无需联网。</p>
+      <p class="muted small">粉哥 🌸 松凶 · Micheal 🎩 紧 · Grok Bot 🤖 平衡 …… 无需联网。</p>
     </section>
 
     <p id="lobby-msg" class="lobby-msg"></p>
@@ -68,13 +76,14 @@
   <div id="banner" class="banner hidden"></div>
   <div id="table-wrap">
     <div id="table">
-      <div class="felt"><div class="felt-logo">♠ ♥ 朋友局 ♣ ♦</div></div>
+      <div class="rail"><div class="felt"><div class="felt-line"></div><div class="felt-logo"><span>♠</span> 朋友局 <span>♥</span></div></div></div>
+      <div id="pot" class="pot"></div>
       <div id="center">
         <div id="board" class="board"></div>
-        <div id="pot" class="pot"></div>
         <div id="center-msg" class="center-msg"></div>
       </div>
       <div id="seats"></div>
+      <div id="fx"></div>
     </div>
   </div>
   <div id="action-bar"></div>
@@ -85,6 +94,6 @@
 <div id="toast" class="toast"></div>
 
 <script src="vendor/peerjs.min.js"></script>
-<script type="module" src="js/app.js"></script>
+<script type="module" src="js/app.js?v=2"></script>
 </body>
 </html>

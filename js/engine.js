@@ -28,6 +28,10 @@ export class Game {
     this.logSeq = 0;
     this.result = null;
     this.runout = false;
+    this.preflopAggressor = -1; // last preflop raiser (for c-bets)
+    this.lastAggressor = -1;    // last bettor/raiser on the current street
+    this.prevAggressor = -1;    // last bettor/raiser on the previous street
+    this.streetRaises = 0;      // bets + raises on the current street
   }
 
   // ---------- seats ----------
@@ -46,6 +50,8 @@ export class Game {
       hole: [], bet: 0, totalBet: 0,
       folded: true, allIn: false, acted: false, inHand: false,
       lastAction: '', showCards: false, score: 0, handName: '',
+      stats: { hands: 0, vpip: 0, pfr: 0, postActs: 0, postAggr: 0 }, // observed tendencies (for the AI)
+      pfRaised: false,
     };
     this.seats[seat] = p;
     return p;
@@ -102,10 +108,12 @@ export class Game {
     this.result = null;
     this.board = [];
     this.runout = false;
+    this.preflopAggressor = this.lastAggressor = this.prevAggressor = -1;
+    this.streetRaises = 0;
     for (const p of this.seats) {
       if (!p) continue;
       p.hole = []; p.bet = 0; p.totalBet = 0; p.allIn = false; p.acted = false;
-      p.lastAction = ''; p.showCards = false; p.score = 0; p.handName = '';
+      p.lastAction = ''; p.showCards = false; p.score = 0; p.handName = ''; p.voluntary = false; p.pfRaised = false;
       p.inHand = this.isEligible(p);
       p.folded = !p.inHand;
     }
@@ -180,6 +188,7 @@ export class Game {
     if (!la) return { ok: false, error: '还没轮到你' };
     const p = this.seats[seat];
     let type = action.type;
+    let aggressive = false;
     if (type === 'bet') type = 'raise';
     if (type === 'check' && !la.canCheck) return { ok: false, error: '不能过牌' };
     if (type === 'call' && la.canCheck) type = 'check';
@@ -215,6 +224,10 @@ export class Game {
         }
         this.currentBet = target;
         this.put(p, target - p.bet);
+        this.lastAggressor = seat;
+        this.streetRaises++;
+        aggressive = true;
+        if (this.phase === 'preflop') { this.preflopAggressor = seat; p.pfRaised = true; }
         const verb = p.allIn ? '全下' : (wasBet ? '下注' : '加注到');
         p.lastAction = `${verb} ${fmt(target)}`;
         this.emit(`${p.name} ${verb} ${fmt(target)}`);
@@ -223,6 +236,11 @@ export class Game {
       return { ok: false, error: '未知操作' };
     }
     p.acted = true;
+    if (this.phase === 'preflop' && type !== 'fold' && type !== 'check') p.voluntary = true; // VPIP
+    if (this.phase !== 'preflop' && p.stats) {
+      p.stats.postActs++;
+      if (aggressive) p.stats.postAggr++;
+    }
     this.advance(seat);
     return { ok: true };
   }
@@ -259,6 +277,9 @@ export class Game {
     this.currentBet = 0;
     this.minRaise = this.bb;
     this.toAct = -1;
+    this.prevAggressor = this.lastAggressor;
+    this.lastAggressor = -1;
+    this.streetRaises = 0;
     if (this.phase === 'river') { this.showdown(); return; }
     this.dealNextStreet();
     if (this.actors().length <= 1) {
@@ -354,6 +375,7 @@ export class Game {
       if (!p) continue;
       p.bet = 0;
       p.totalBet = 0; // pot has been paid out
+      if (p.inHand && p.stats) { p.stats.hands++; if (p.voluntary) p.stats.vpip++; if (p.pfRaised) p.stats.pfr++; }
       if (p.inHand && p.chips === 0) this.emit(`${p.name} 筹码输光，出局（房主可补码）`, 'bust');
     }
     for (let i = 0; i < MAX_SEATS; i++) {

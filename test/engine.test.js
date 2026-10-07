@@ -257,3 +257,40 @@ test('smoke: 200 bot-vs-bot hands, total chips constant', () => {
   assert.ok(stats.folds > 50 && stats.raises > 20 && stats.checks > 20);
   void BOT_STYLES;
 });
+
+test('bot never folds when checking is free, and plays sane preflop ranges', async () => {
+  const { botDecide, handPercentile } = await import('../js/bot.js');
+  const { parseCards } = await import('../js/cards.js');
+  const R = seededRandInt(9).random;
+  // random spots: whenever check is legal the bot must not fold
+  for (let t = 0; t < 300; t++) {
+    const g = new Game({ sb: 500, bb: 1000 });
+    const n = 2 + Math.floor(R() * 5);
+    for (let i = 0; i < n; i++) g.addPlayer(i, { id: 'b' + i, name: 'B' + i, isBot: true, botStyle: ['loose', 'tight', 'balanced'][i % 3] });
+    g.startHand();
+    let guard = 0;
+    while (g.phase !== 'handover' && guard++ < 200) {
+      if (g.runout) { g.continueRunout(); continue; }
+      const la = g.legal(g.toAct);
+      const d = botDecide(g, g.toAct, { iters: 60, random: R });
+      if (la.canCheck) assert.notEqual(d.type, 'fold');
+      assert.ok(g.act(g.toAct, d).ok);
+    }
+  }
+  assert.ok(handPercentile(parseCards('As Ad')) < 0.01);
+  assert.ok(handPercentile(parseCards('7c 2d')) > 0.95);
+  // first to act 6-handed: AK always plays (old AI folded it!), 72o always folds
+  const mk = (hole) => {
+    const g = new Game({ sb: 500, bb: 1000, randInt: seededRandInt(3) });
+    for (let i = 0; i < 6; i++) g.addPlayer(i, { id: 'b' + i, name: 'B' + i, isBot: true, botStyle: 'tight' });
+    g.startHand();
+    g.seats[g.toAct].hole = parseCards(hole);
+    return g;
+  };
+  for (let i = 0; i < 30; i++) {
+    let g = mk('Ah Kd');
+    assert.notEqual(botDecide(g, g.toAct, { random: R }).type, 'fold');
+    g = mk('7h 2d');
+    assert.equal(botDecide(g, g.toAct, { random: R }).type, 'fold');
+  }
+});

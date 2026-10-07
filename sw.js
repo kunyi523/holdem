@@ -1,7 +1,7 @@
 // Network-first service worker: always tries fresh files, falls back to cache when offline.
-const CACHE = 'holdem-v1';
+const CACHE = 'holdem-v2';
 const ASSETS = ['./', './index.html', './css/style.css', './js/app.js', './js/engine.js', './js/cards.js', './js/evaluator.js',
-  './js/pots.js', './js/bot.js', './js/controller.js', './js/net.js', './vendor/peerjs.min.js', './manifest.webmanifest'];
+  './js/pots.js', './js/bot.js', './js/preflop.js', './js/controller.js', './js/net.js', './vendor/peerjs.min.js', './manifest.webmanifest'];
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
 });
