@@ -1,0 +1,9 @@
+{
+  "name": "德州扑克 · 朋友局",
+  "short_name": "德州扑克",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#0b2416",
+  "theme_color": "#0b2416",
+  "icons": []
+}
