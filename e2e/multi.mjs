@@ -11,6 +11,7 @@ const mk = async (ctx, tag) => {
   p.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') errors.push(tag + ' ' + m.type() + ': ' + m.text()); });
   p.on('dialog', (d) => d.accept());
   if (process.env.FAKE) {
+    await p.setBypassServiceWorker(true);
     await p.setRequestInterception(true);
     p.on('request', (r) => r.url().includes('vendor/peerjs') ? r.respond({ status: 200, contentType: 'application/javascript', body: FAKE_SRC }) : r.continue());
   }
@@ -28,7 +29,7 @@ await host.click('.modal-close');
 
 const ctx2 = process.env.FAKE ? browser.defaultBrowserContext() : await browser.createBrowserContext();
 const cli = await mk(ctx2, 'CLIENT');
-await cli.goto(link.replace(/^https?:\/\/[^/]+\//, URL), { waitUntil: 'networkidle0' });
+await cli.goto(URL.includes('localhost') ? link.replace(/^https?:\/\/[^/]+\//, URL) : link, { waitUntil: 'networkidle0' });
 await cli.$eval('#nick', (e) => { e.value = ''; }); await cli.type('#nick', '朋友A');
 await cli.click('#btn-join');
 try { await cli.waitForFunction(() => window.__holdem.joined, { timeout: 25000 }); } catch (e) { console.log('JOIN FAIL', await cli.$eval('#lobby-msg', (x) => x.textContent), errors); await browser.close(); process.exit(1); }
