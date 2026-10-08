@@ -1,12 +1,12 @@
 // UI + session management (single-player / host / client).
-import { HostController } from './controller.js?v=3';
-import { hostRoom, joinRoom, peerAvailable, errText, normalizeCode } from './net.js?v=3';
-import { RANKS, SUIT_SYMBOLS } from './cards.js?v=3';
-import { STARTING_CHIPS, MAX_SEATS } from './engine.js?v=3';
-import { PERSONALITIES, STYLE_KEYS, styleInfo, resolveStyle } from './bot.js?v=3';
-import { BOT_NAMES, defaultStyleFor } from './controller.js?v=3';
-import { bestFive, heroHandInfo, quickEquity } from './handinfo.js?v=3';
-import { play, isMuted, setMuted } from './sound.js?v=3';
+import { HostController } from './controller.js?v=4';
+import { hostRoom, joinRoom, errText, normalizeCode, parseInvite } from './net.js?v=4';
+import { RANKS, SUIT_SYMBOLS } from './cards.js?v=4';
+import { STARTING_CHIPS, MAX_SEATS } from './engine.js?v=4';
+import { PERSONALITIES, STYLE_KEYS, styleInfo, resolveStyle } from './bot.js?v=4';
+import { BOT_NAMES, defaultStyleFor } from './controller.js?v=4';
+import { bestFive, heroHandInfo, quickEquity } from './handinfo.js?v=4';
+import { play, isMuted, setMuted } from './sound.js?v=4';
 
 const $ = (s) => document.querySelector(s);
 const fmt = (n) => Number(n || 0).toLocaleString('en-US');
@@ -46,7 +46,10 @@ const S = {
   pending: false,
   broadcastQueued: false,
   lastTurnKey: '',
-  brokerOk: true,
+  net: null,             // host: { direct, relay, relayTotal }
+  key: '',               // room encryption key (lives only in the link #fragment)
+  transport: '',         // client: 'direct' | 'relay'
+  netState: '',          // client: 'connecting' | 'ok' | 'reconnecting' | 'failed'
   heartbeat: null,
 };
 
@@ -68,7 +71,9 @@ $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') clos
 const nick = $('#nick');
 nick.value = localStorage.getItem('holdem.nick') || '';
 const params = new URLSearchParams(location.search);
-const roomParam = normalizeCode(params.get('room'));
+const invite = parseInvite(location.search, location.hash);
+const roomParam = invite.code;
+S.key = invite.key;
 if (roomParam) {
   $('#join-code').value = roomParam;
   $('#join-panel').classList.add('highlight');
@@ -119,11 +124,19 @@ $('#btn-solo').onclick = () => { if (requireName()) startSolo(lineup); };
 $('#btn-host').onclick = () => { if (requireName()) startHost(); };
 $('#btn-join').onclick = () => {
   if (!requireName()) return;
-  const code = normalizeCode($('#join-code').value);
-  if (code.length < 4) { lobbyMsg('请输入正确的房间码'); return; }
-  startJoin(code);
+  const raw = $('#join-code').value;
+  const inv = parseInvite(raw);
+  const code = inv.code;
+  if (code.length < 4) { lobbyMsg('请输入正确的房间码（或直接粘贴邀请链接）'); return; }
+  // typed code = same room as the link we opened → keep the link's key
+  const key = inv.key || (code === roomParam ? invite.key : '');
+  startJoin(code, key);
 };
 $('#join-code').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#btn-join').click(); });
+$('#join-code').addEventListener('paste', () => setTimeout(() => { // pasted a whole invite link → keep it, show the code
+  const el = $('#join-code'); const inv = parseInvite(el.value);
+  if (inv.key && inv.code) { el.dataset.key = inv.key; invite.key = inv.key; el.value = inv.code; }
+}, 0));
 $('#lnk-rules').onclick = (e) => { e.preventDefault(); showRules(); };
 
 function showGame() {
@@ -169,41 +182,36 @@ function startSolo(bots) {
 }
 
 function startHost() {
-  if (!peerAvailable()) { lobbyMsg('联网组件加载失败（PeerJS），请检查网络后刷新；也可以先玩单机。'); return; }
   lobbyMsg('正在创建房间…');
   $('#btn-host').disabled = true;
   S.mode = 'host';
   makeController();
   S.mySeat = S.ctrl.addHuman('host:' + S.token, S.name, 0);
-  const handlers = {
-    onReady(code, peer) {
-      S.code = code; S.peer = peer;
+  S.peer = hostRoom({
+    onReady(code, key, net) {
+      S.code = code; S.key = key; S.net = net;
       $('#btn-host').disabled = false;
+      lobbyMsg('');
+      history.replaceState(null, '', `?room=${code}#k=${key}`);
       showGame();
       setView(S.ctrl.view(S.mySeat));
       showInvite();
       startHostHeartbeat();
     },
-    onRetry(peer) { S.peer = peer; },
     onConnection: handleIncoming,
-    onBrokerState(ok) { S.brokerOk = ok; renderNetDot(); },
-    onError(err, opened) {
-      console.warn('peer error', err);
-      if (!opened) {
-        $('#btn-host').disabled = false;
-        lobbyMsg('创建房间失败：' + errText(err));
-        S.mode = null; S.ctrl.destroy(); S.ctrl = null;
-      } else if (err.type !== 'peer-unavailable') {
-        toast('网络提示：' + errText(err));
-      }
+    onNetState(net) { S.net = net; renderNetDot(); },
+    onError(err) {
+      console.warn('host error', err);
+      $('#btn-host').disabled = false;
+      lobbyMsg('创建房间失败：' + errText(err) + '（可点「创建房间」重试）');
+      S.mode = null; S.ctrl.destroy(); S.ctrl = null;
     },
-  };
-  S.peer = hostRoom(handlers);
+  });
   window.addEventListener('beforeunload', (e) => { if (S.mode === 'host') { e.preventDefault(); e.returnValue = ''; } });
 }
 
 function inviteLink() {
-  return `${location.origin}${location.pathname}?room=${S.code}`;
+  return `${location.origin}${location.pathname}?room=${S.code}${S.key ? '#k=' + S.key : ''}`;
 }
 
 function handleIncoming(conn) {
@@ -236,8 +244,10 @@ function onRemoteMsg(conn, msg) {
         return;
       }
     }
-    r = { conn, seat, lastSeen: Date.now() };
+    const isNew = !S.remotes.has(conn.peer);
+    r = { conn, seat, lastSeen: Date.now(), transport: conn.transport || 'direct' };
     S.remotes.set(conn.peer, r);
+    if (isNew) toast(`${name} 已连接（${r.transport === 'relay' ? '加密中继' : '直连'}）`);
     conn.send({ t: 'welcome', seat, code: S.code });
     onLocalChange();
     return;
@@ -275,38 +285,47 @@ function startHostHeartbeat() {
 }
 
 // ---------------- client ----------------
-function startJoin(code) {
-  if (!peerAvailable()) { lobbyMsg('联网组件加载失败（PeerJS），请检查网络后刷新。'); return; }
+function startJoin(code, key) {
   S.mode = 'client';
   S.code = code;
+  S.key = key || '';
+  S.netState = 'connecting';
   lobbyMsg(`正在连接房间 ${code}…`);
   $('#btn-join').disabled = true;
-  connectClient();
-  if (!roomParam) history.replaceState(null, '', `?room=${code}`);
+  const netParam = new URLSearchParams(location.search).get('net');
+  history.replaceState(null, '', `?room=${code}${netParam ? '&net=' + netParam : ''}${S.key ? '#k=' + S.key : ''}`);
+  connectClient(false);
 }
 
-function connectClient() {
-  try { S.client && S.client.peer.destroy(); } catch (e) { /* */ }
-  S.client = joinRoom(S.code, {
-    onOpen(conn) { conn.send({ t: 'join', name: S.name, token: S.token }); S.lastMsgAt = Date.now(); },
-    onData: onHostMsg,
-    onClose() { onClientDisconnected('连接已断开'); },
+// One connection attempt (direct first, encrypted relay fallback — see net.js).
+function connectClient(isRetry) {
+  try { S.client && S.client.destroy(); } catch (e) { /* */ }
+  const attempt = S.client = joinRoom(S.code, S.key, {
+    onProgress(t) { if (!S.joined) lobbyMsg(t); else if (S.netState === 'reconnecting') showBanner(`连接中断，正在重连…（第 ${S.reconnectTries} 次）· ${esc(t)}`, 'info'); },
+    onOpen(conn) {
+      if (S.client !== attempt) return;
+      S.transport = conn.transport;
+      conn.send({ t: 'join', name: S.name, token: S.token });
+      S.lastMsgAt = Date.now();
+      if (!S.joined) lobbyMsg(`已连接（${conn.transport === 'relay' ? '加密中继' : '直连'}），正在入座…`);
+    },
+    onData(msg) { if (S.client === attempt) onHostMsg(msg); },
+    onClose() { if (S.client === attempt) onClientDisconnected('连接已断开'); },
     onError(err) {
+      if (S.client !== attempt) return;
       console.warn('client error', err);
-      if (!S.joined) {
-        $('#btn-join').disabled = false;
-        lobbyMsg('加入失败：' + errText(err));
-        try { S.client.peer.destroy(); } catch (e) { /* */ }
-        S.mode = null;
-      } else onClientDisconnected(errText(err));
+      if (isRetry) { scheduleReconnect(err); return; }
+      $('#btn-join').disabled = false;
+      lobbyMsg('加入失败：' + errText(err) + '。可点「加入」重试。');
+      S.mode = null; S.netState = 'failed';
     },
   });
 }
 
 function sendToHost(msg) {
   const c = S.client && S.client.conn;
-  if (c && c.open) { c.send(msg); return true; }
-  toast('未连接到房主');
+  if (c && c.open) { try { c.send(msg); return true; } catch (e) { /* */ } }
+  if (msg.t !== 'pong') toast('未连接到房主，正在重连…');
   return false;
 }
 
@@ -318,15 +337,20 @@ function onHostMsg(msg) {
     const first = !S.joined;
     S.joined = true;
     S.reconnectTries = 0;
+    S.netState = 'ok';
+    clearTimeout(S.retryTimer);
     $('#btn-join').disabled = false;
+    lobbyMsg('');
     hideBanner();
-    if (first) { showGame(); startClientWatchdog(); toast('已加入房间，等待房主开始'); }
-    renderNetDot(true);
+    if (first) { showGame(); startClientWatchdog(); toast(`已加入房间（${S.transport === 'relay' ? '加密中继' : '直连'}），等待房主开始`); }
+    else toast('已重新连上 👍');
+    renderNetDot();
   } else if (msg.t === 'state') {
     setView(msg.view);
   } else if (msg.t === 'ping') {
     sendToHost({ t: 'pong' });
   } else if (msg.t === 'reject') {
+    S.leaving = true;
     alert(msg.reason || '无法加入');
     location.href = location.pathname;
   } else if (msg.t === 'error') {
@@ -338,41 +362,73 @@ function onHostMsg(msg) {
 function startClientWatchdog() {
   clearInterval(S.heartbeat);
   S.heartbeat = setInterval(() => {
-    if (S.joined && !S.reconnecting && Date.now() - S.lastMsgAt > 13000) onClientDisconnected('长时间没有收到房主数据');
+    if (S.joined && S.netState === 'ok' && Date.now() - S.lastMsgAt > 12000) onClientDisconnected('长时间没有收到房主数据');
   }, 3000);
 }
 
+// Lost the host: keep retrying (direct + relay) with gentle backoff for ~3 minutes, then offer a button.
 function onClientDisconnected(reason) {
-  if (S.leaving || !S.joined || S.reconnecting) return;
-  S.reconnecting = true;
-  renderNetDot(false);
-  const tryAgain = () => {
-    S.reconnectTries++;
-    if (S.reconnectTries > 10) {
-      S.reconnecting = false;
-      showBanner(`与房主的连接已断开（${esc(reason)}）。房主可能关闭了页面。<button class="btn small-btn" onclick="location.reload()">重试</button>`);
-      return;
-    }
-    showBanner(`连接中断，正在重连…（第 ${S.reconnectTries} 次）`, 'info');
-    S.client = joinRoom(S.code, {
-      onOpen(conn) { S.reconnecting = false; conn.send({ t: 'join', name: S.name, token: S.token }); S.lastMsgAt = Date.now(); },
-      onData: onHostMsg,
-      onClose() { S.reconnecting = false; onClientDisconnected('连接已断开'); },
-      onError() { try { S.client.peer.destroy(); } catch (e) { /* */ } setTimeout(tryAgain, 3000); },
-    });
-  };
-  try { S.client && S.client.peer.destroy(); } catch (e) { /* */ }
-  setTimeout(tryAgain, 1500);
+  if (S.leaving || !S.joined || S.netState === 'reconnecting') return;
+  S.netState = 'reconnecting';
+  S.lastReason = reason;
+  S.reconnectTries = 0;
+  try { S.client && S.client.destroy(); } catch (e) { /* */ }
+  S.client = null;
+  renderNetDot();
+  showBanner('连接中断，正在重连…', 'info');
+  clearTimeout(S.retryTimer);
+  S.retryTimer = setTimeout(reconnectNow, 800);
+}
+function reconnectNow() {
+  clearTimeout(S.retryTimer);
+  if (S.leaving || S.netState === 'ok') return;
+  S.netState = 'reconnecting';
+  S.reconnectTries++;
+  renderNetDot();
+  showBanner(`连接中断，正在重连…（第 ${S.reconnectTries} 次）`, 'info');
+  connectClient(true);
+}
+function scheduleReconnect(err) {
+  if (S.netState === 'ok') return;
+  if (S.reconnectTries >= 12) {
+    S.netState = 'failed';
+    renderNetDot();
+    showBanner(`与房主的连接已断开：${esc(errText(err))} <button class="btn small-btn" id="btn-retry-net">重试</button>`);
+    const b = $('#btn-retry-net'); if (b) b.onclick = () => { S.reconnectTries = 0; reconnectNow(); };
+    return;
+  }
+  const wait = Math.min(1500 * 2 ** Math.min(S.reconnectTries, 3), 10000);
+  S.retryTimer = setTimeout(reconnectNow, wait);
 }
 
 function showBanner(html, kind = '') { const b = $('#banner'); b.innerHTML = html; b.className = 'banner ' + kind; }
 function hideBanner() { $('#banner').className = 'banner hidden'; }
-function renderNetDot(ok) {
+function renderNetDot() {
   const d = $('#net-dot');
-  if (S.mode === 'solo') { d.className = 'net-dot hidden'; return; }
-  if (ok === undefined) ok = S.mode === 'host' ? S.brokerOk : !S.reconnecting;
-  d.className = 'net-dot ' + (ok ? 'ok' : 'bad');
+  if (S.mode === 'solo' || !S.mode) { d.className = 'net-pill hidden'; return; }
+  let cls, text, title;
+  if (S.mode === 'host') {
+    const n = S.net || {};
+    const ok = n.direct || n.relay > 0;
+    cls = ok ? 'ok' : 'bad';
+    text = ok ? '在线' : '离线';
+    title = `直连信令：${n.direct ? '正常' : '断开'} · 加密中继：${n.relay || 0}/${n.relayTotal || 0} 个服务器在线`;
+    const relays = [...S.remotes.values()].filter((r) => r.transport === 'relay').length;
+    if (S.remotes.size) { text += `·${S.remotes.size}人`; title += ` · 已连接 ${S.remotes.size} 人（${relays} 人走中继）`; }
+  } else {
+    const st = S.netState;
+    cls = st === 'ok' ? (S.transport === 'relay' ? 'ok relay' : 'ok') : st === 'failed' ? 'bad' : 'warn';
+    text = st === 'ok' ? (S.transport === 'relay' ? '中继' : '直连') : st === 'failed' ? '已断开' : '重连中';
+    title = st === 'ok' ? (S.transport === 'relay' ? '通过加密中继连接房主（端到端加密）' : 'WebRTC 直连房主') : '点我立即重连';
+  }
+  d.className = 'net-pill ' + cls;
+  d.title = title;
+  d.innerHTML = `<i></i>${esc(text)}`;
 }
+$('#net-dot').onclick = () => {
+  if (S.mode === 'client' && S.netState !== 'ok') { S.reconnectTries = 0; reconnectNow(); }
+  else if (S.mode) toast($('#net-dot').title, 3500);
+};
 
 // ---------------- actions ----------------
 function sendAction(action) {
@@ -981,11 +1037,11 @@ function showInvite() {
       ${navigator.share ? '<button class="btn" id="btn-share">分享</button>' : ''}
     </div>
     <ol class="steps">
-      <li>把链接发到微信群（或告诉朋友房间码）</li>
+      <li>把<b>完整链接</b>发到微信群（链接 # 后面是加密密钥，4G/5G 也能连）</li>
       <li>朋友打开链接 → 输入昵称 → 点「加入」</li>
       <li>人齐后，房主点「▶ 开始游戏」</li>
     </ol>
-    <p class="muted small">房主负责发牌，请保持本页面打开、手机不要锁屏。</p>`);
+    <p class="muted small">房主负责发牌，请保持本页面打开、手机不要锁屏。网络不支持直连时会自动改走端到端加密的中继，服务器看不到牌。</p>`);
   S.modalKind = 'invite';
   $('#btn-copy').onclick = () => copyText(link);
   const sh = $('#btn-share');
@@ -1109,7 +1165,14 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
   document.title = '德州扑克 · 朋友局';
   if (S.mode) requestWakeLock();
+  // back from background / screen lock: revive connections right away instead of waiting for timeouts
+  if (S.mode === 'host' && S.peer && S.peer.kick) S.peer.kick();
+  if (S.mode === 'client' && S.joined) {
+    if (S.netState === 'ok' && Date.now() - S.lastMsgAt > 5000) onClientDisconnected('切回页面时连接已失效');
+    else if (S.netState !== 'ok') { S.reconnectTries = Math.min(S.reconnectTries, 6); reconnectNow(); }
+  }
 });
+window.addEventListener('online', () => { if (S.mode === 'client' && S.joined && S.netState !== 'ok') reconnectNow(); if (S.mode === 'host' && S.peer && S.peer.kick) S.peer.kick(); });
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});

@@ -1,6 +1,6 @@
 // Host-side controller: owns the authoritative Game, drives bots, timers, hand scheduling.
-import { Game, STARTING_CHIPS } from './engine.js?v=3';
-import { botDecide, resolveStyle, STYLE_KEYS, PERSONALITIES } from './bot.js?v=3';
+import { Game, STARTING_CHIPS } from './engine.js?v=4';
+import { botDecide, resolveStyle, STYLE_KEYS, PERSONALITIES } from './bot.js?v=4';
 
 export const BOT_NAMES = ['粉哥', 'Micheal', 'Grok Bot', '小龙', '阿杰', 'Lucy', '老王', '阿May'];
 // default personality per AI seat (the host can change it in the menu / lobby)

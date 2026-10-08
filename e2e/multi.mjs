@@ -58,7 +58,7 @@ const hostInfo = await host.evaluate(() => { const g = window.__holdem.ctrl.game
 const cliView = await cli.evaluate(() => { const v = window.__holdem.view; return { hand: v.handNo, phase: v.phase, seats: v.seats.filter(Boolean).map((s) => `${s.name}:${s.chips}`) }; });
 await cli.screenshot({ path: '/workspace/shot-client.png' });
 // disconnect test: close client page, host should mark offline
-await cli.evaluate(() => { window.__holdem.leaving = true; window.__holdem.client.peer.destroy(); });
+await cli.evaluate(() => { window.__holdem.leaving = true; window.__holdem.client.destroy(); });
   /* simulate abrupt network loss: peer destroyed -> conn close */
 await new Promise((r) => setTimeout(r, 16000));
 const afterDisc = await host.evaluate(() => window.__holdem.ctrl.game.seats.filter(Boolean).map((p) => `${p.name}:${p.connected}`));

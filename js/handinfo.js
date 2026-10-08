@@ -1,7 +1,7 @@
 // Hand helpers for the UI: best five cards (showdown highlight) and the hero's hand-strength label.
-import { evaluate, describeScore } from './evaluator.js?v=3';
-import { handPercentile, estimateEquity } from './bot.js?v=3';
-import { RANKS } from './cards.js?v=3';
+import { evaluate, describeScore } from './evaluator.js?v=4';
+import { handPercentile, estimateEquity } from './bot.js?v=4';
+import { RANKS } from './cards.js?v=4';
 
 // Best 5-card subset of 5–7 cards. Returns { score, cards } (cards = the five that make the hand).
 export function bestFive(cards) {

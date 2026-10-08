@@ -49,7 +49,11 @@
 
 ## 技术
 - 纯静态站点（GitHub Pages）。ES modules，无构建步骤。
-- 联机：[PeerJS](https://peerjs.com/)（已内置 `vendor/peerjs.min.js`），使用 PeerJS 免费公共信令服务器 + Google/Cloudflare STUN，数据通过 WebRTC 在浏览器之间直连。房主权威，客户端只发送操作。
+- 联机（v4）：两条通道，房主权威，客户端只发送操作。
+  - **直连**：[PeerJS](https://peerjs.com/)（内置 `vendor/peerjs.min.js`）+ Google/Cloudflare STUN，WebRTC 浏览器直连。
+  - **加密中继**（`js/relay.js`）：直连 2.5 秒内没连上就自动改走免费公共 MQTT-over-WSS 服务器（shiftr.io 公共实例走 443 端口，另有 HiveMQ / EMQX / Mosquitto 备用；房主同时监听全部，朋友连上哪个用哪个）。所有消息用 AES-GCM 端到端加密，密钥只在邀请链接 `#k=…` 里（# 后面的部分不会发给任何服务器），服务器只能看到乱码；带序号防重放。适用于 4G/5G 运营商级 NAT、对称 NAT、只放行 443 的网络。
+  - 断线自动重连（切后台回来、网络切换会立即重连），右上角显示「直连 / 中继 / 重连中 / 已断开（点击重试）」。
+  - 调试：`?net=relay` 强制中继，`?net=direct` 只用直连。
 - `js/engine.js` 规则引擎 · `js/evaluator.js` 牌力评估 · `js/pots.js` 边池 · `js/bot.js` AI 性格 · `js/controller.js` 房主调度 · `js/net.js` 联机 · `js/app.js` 界面 · `js/handinfo.js` 牌力提示/最佳五张 · `js/sound.js` 合成音效。
 
 ## 测试
@@ -59,8 +63,9 @@ npm test   # node --test：牌型评估、边池、规则场景、3000 手随机
 `e2e/` 里是可选的无头浏览器测试（需要 `puppeteer-core` 和 Chrome；`FAKE=1` 用 BroadcastChannel 模拟 PeerJS 传输；`shots3.mjs` 截图手机/电脑的牌局中与摊牌画面）。
 
 ## 已知限制
-- 依赖 PeerJS 免费公共信令服务器（0.peerjs.com），偶尔可能不稳定；连不上时稍后重试即可。
-- 没有 TURN 中继服务器：极少数网络（对称 NAT、部分公司/校园网、某些移动网络）之间 WebRTC 可能无法直连。换 Wi-Fi/4G 一般可解决。
+- 依赖免费公共服务器（PeerJS 信令、公共 MQTT 服务器），没有 SLA；四个中继服务器同时宕机时才会连不上。
+- 只输入房间码（不用链接）时没有密钥，只能走直连；用完整邀请链接最稳。
+- 中继延迟约 0.2–0.5 秒，打牌无感。
 - 房主关闭页面或手机锁屏/切到后台过久，牌局会中断（手机浏览器会暂停后台页面）。
 - 牌局状态只保存在房主浏览器内存中，刷新房主页面会丢失牌局。
 - 音效需要先点一下页面才能播放（浏览器限制）；iPhone 不支持网页震动。
