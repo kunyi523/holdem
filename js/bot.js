@@ -1,16 +1,68 @@
-// Poker AI v2.
-// Preflop: starting-hand ranking (169 hands) + per-personality ranges, position, raise size.
-// Postflop: Monte-Carlo equity vs the number of live opponents compared with pot odds,
-//           plus draws (semi-bluffs / drawing calls), continuation bets, bluffs and floats.
-import { evaluate } from './evaluator.js';
-import { PREFLOP_ORDER } from './preflop.js';
+// Poker AI v3 — distinct, consistent personalities.
+// Shared core: 169-hand preflop ranking, Monte-Carlo equity vs estimated ranges, draws, opponent modelling.
+// Each personality is a parameter set that drives very different decisions on top of that core:
+//   maniac  疯狂型  loose-aggressive: plays most hands, raises/re-raises, barrels, overbets, shoves
+//   rock    紧凶型  tight: few hands, bets big when strong, almost never bluffs, folds to pressure
+//   station 跟注站  loose-passive: limps/calls a lot, rarely raises, chases draws, hard to bluff
+//   tricky  诡诈型  trapper: slow-plays monsters, check-raises, mixed sizings, river bluff-raises
+//   regular 稳健型  solid baseline (the v2 "balanced" bot)
+// Plus per-decision noise, varied bet sizes and mild tilt after losing a big pot (game sets p.tilt).
+import { evaluate } from './evaluator.js?v=3';
+import { PREFLOP_ORDER } from './preflop.js?v=3';
 
-export const BOT_STYLES = {
-  //            open-raise range, total voluntary range, 3-bet range, c-bet freq, bluff freq, float freq, call margin
-  loose:    { pfr: 0.22, vpip: 0.44, threeBet: 0.09, cbet: 0.78, bluff: 0.16, float: 0.18, margin: -0.04, limp: 0.55 }, // 粉哥：松凶
-  tight:    { pfr: 0.15, vpip: 0.21, threeBet: 0.045, cbet: 0.60, bluff: 0.06, float: 0.05, margin: 0.04, limp: 0.15 }, // Micheal：紧
-  balanced: { pfr: 0.19, vpip: 0.29, threeBet: 0.065, cbet: 0.68, bluff: 0.10, float: 0.10, margin: 0.0, limp: 0.30 }, // Grok Bot：平衡
+export const PERSONALITIES = {
+  maniac: {
+    label: '疯狂型', en: 'Maniac', emoji: '🔥', color: '#ff6a3d',
+    blurb: '什么牌都想玩，爱加注、爱反加，连续开火，动不动超池或全下',
+    open: 0.36, vpip: 0.66, limp: 0.12, raiseOption: 0.45, defend: 0.48, threeBet: 0.15, fourBet: 0.08, lightThreeBet: 0.3,
+    openSize: [3, 3.5, 4, 5], threeBetSize: [3.2, 3.8, 4.5], pfShove: 0.035, trapPre: 0, posSense: 1,
+    margin: -0.08, fear: 0.55, betValue: 0.95, betMedium: 0.7, cbet: 0.92, barrel: 0.72, semiBluff: 0.85, bluff: 0.36,
+    float: 0.32, raiseValue: 0.85, raiseLight: 0.2, bluffRaise: 0.13, slowplay: 0.04, checkRaise: 0.15, chase: 0.04,
+    sizes: [0.6, 0.75, 0.9, 1.1], overbet: 0.12, shove: 0.04, foldBig: 0, noise: 0.07, airMult: 1,
+  },
+  rock: {
+    label: '紧凶型', en: 'Rock', emoji: '🪨', color: '#8fa3b8',
+    blurb: '只玩好牌，一出手就是重注；几乎不诈唬，被大注施压没好牌就弃',
+    open: 0.1, vpip: 0.1, limp: 0, raiseOption: 0.25, defend: 0.1, threeBet: 0.035, fourBet: 0.02, lightThreeBet: 0,
+    openSize: [3, 3.5], threeBetSize: [3.5, 4], pfShove: 0, trapPre: 0, posSense: 0.5,
+    margin: 0.06, fear: 1.5, betValue: 0.9, betMedium: 0.25, cbet: 0.55, barrel: 0.3, semiBluff: 0.2, bluff: 0.02,
+    float: 0.0, raiseValue: 0.8, raiseLight: 0, bluffRaise: 0, slowplay: 0.05, checkRaise: 0.1, chase: -0.03,
+    sizes: [0.75, 0.9, 1.05], overbet: 0.08, shove: 0, foldBig: 0.75, noise: 0.03, airMult: 0.35,
+  },
+  station: {
+    label: '跟注站', en: 'Calling Station', emoji: '🐟', color: '#4fc3f7',
+    blurb: '什么都跟，很少加注；听牌一定追，很难被诈唬走',
+    open: 0.04, vpip: 0.62, limp: 1, raiseOption: 0.05, defend: 0.5, threeBet: 0.012, fourBet: 0.01, lightThreeBet: 0,
+    openSize: [2.5, 3], threeBetSize: [3], pfShove: 0, trapPre: 0, posSense: 0.2,
+    margin: -0.15, fear: 0.3, betValue: 0.3, betMedium: 0.1, cbet: 0.25, barrel: 0.15, semiBluff: 0.06, bluff: 0.02,
+    float: 0.6, raiseValue: 0.2, raiseLight: 0, bluffRaise: 0, slowplay: 0.4, checkRaise: 0.05, chase: 0.2,
+    sizes: [0.33, 0.45, 0.55], overbet: 0, shove: 0, foldBig: 0, noise: 0.05, airMult: 0.5, callsDown: true,
+  },
+  tricky: {
+    label: '诡诈型', en: 'Trickster', emoji: '🦊', color: '#c77dff',
+    blurb: '大牌慢打埋伏，爱过牌加注，下注尺度忽大忽小，河牌偶尔诈唬加注',
+    open: 0.18, vpip: 0.24, limp: 0.15, raiseOption: 0.3, defend: 0.27, threeBet: 0.085, fourBet: 0.04, lightThreeBet: 0.12,
+    openSize: [2.2, 2.5, 3, 4], threeBetSize: [2.8, 3.5, 4.5], pfShove: 0.01, trapPre: 0.35, posSense: 1,
+    margin: 0, fear: 0.9, betValue: 0.55, betMedium: 0.3, cbet: 0.5, barrel: 0.45, semiBluff: 0.45, bluff: 0.13,
+    float: 0.22, raiseValue: 0.45, raiseLight: 0.06, bluffRaise: 0.11, slowplay: 0.6, checkRaise: 0.7, chase: 0.02,
+    sizes: [0.25, 0.4, 0.66, 1.0, 1.5], overbet: 0.15, shove: 0.02, foldBig: 0, noise: 0.06, airMult: 1,
+  },
+  regular: {
+    label: '稳健型', en: 'Regular', emoji: '🎯', color: '#7bd88f',
+    blurb: '标准打法：按位置和胜率行动，偶尔诈唬',
+    open: 0.19, vpip: 0.27, limp: 0.3, raiseOption: 0.4, defend: 0.29, threeBet: 0.065, fourBet: 0.03, lightThreeBet: 0.08,
+    openSize: [2.5, 3, 3.2], threeBetSize: [3, 3.4], pfShove: 0, trapPre: 0.05, posSense: 1,
+    margin: 0, fear: 1, betValue: 0.75, betMedium: 0.25, cbet: 0.68, barrel: 0.45, semiBluff: 0.5, bluff: 0.1,
+    float: 0.1, raiseValue: 0.6, raiseLight: 0.04, bluffRaise: 0.04, slowplay: 0.18, checkRaise: 0.3, chase: 0,
+    sizes: [0.45, 0.6, 0.75], overbet: 0.02, shove: 0, foldBig: 0.2, noise: 0.04, airMult: 0.8,
+  },
 };
+// v2 style names (old saves / tests) map onto the new personalities
+export const STYLE_ALIASES = { loose: 'maniac', tight: 'rock', balanced: 'regular' };
+export const STYLE_KEYS = ['maniac', 'rock', 'station', 'tricky', 'regular'];
+export const resolveStyle = (s) => (PERSONALITIES[s] ? s : STYLE_ALIASES[s] || 'regular');
+export const styleInfo = (s) => PERSONALITIES[resolveStyle(s)];
+export const BOT_STYLES = PERSONALITIES; // backwards-compatible export
 
 // ---------- preflop hand percentile (0 = AA ... 1 = 32o), by combos ----------
 const RANKS = '23456789TJQKA';
@@ -104,6 +156,8 @@ export function drawOuts(hole, board) {
 }
 
 const roundTo = (x, unit) => Math.max(unit, Math.round(x / unit) * unit);
+const pick = (arr, random) => arr[Math.floor(random() * arr.length) % arr.length];
+const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 
 // Opponent model: how loose/aggressive has this player been? (Bayesian prior ≈ a normal player)
 export function villainProfile(p) {
@@ -115,12 +169,32 @@ export function villainProfile(p) {
   };
 }
 
+// Tilt: after losing a big pot a bot plays looser and more aggressively for a few hands.
+// Called by the engine at the end of every hand with the player's net result.
+export function updateTilt(p, net, bb) {
+  let t = (p.tilt || 0) * 0.6;
+  // a "big pot" = at least 40 big blinds and 40% of what the player started the hand with
+  const big = Math.max(40 * bb, 0.4 * (p.handStart || 0));
+  if (net <= -big) t += 0.5 + Math.min(0.4, -net / (150 * bb));
+  p.tilt = t < 0.1 ? 0 : Math.min(1, t);
+  return p.tilt;
+}
+
+// Returns { type, amount?, tag } — tag describes the intent ('value', 'bluff', 'slowplay', 'checkraise', ...)
 export function botDecide(game, seat, opts = {}) {
   const random = opts.random || Math.random;
   const p = game.seats[seat];
   const la = game.legal(seat);
   if (!la) return null;
-  const st = BOT_STYLES[p.botStyle] || BOT_STYLES.balanced;
+  const base = PERSONALITIES[resolveStyle(p.botStyle)];
+  const tilt = opts.tilt ?? (p.tilt || 0);
+  // tilted bots: wider ranges, more bluffs, calls lighter
+  const st = tilt > 0 ? {
+    ...base,
+    open: Math.min(0.85, base.open + 0.12 * tilt), vpip: Math.min(0.9, base.vpip + 0.15 * tilt), defend: Math.min(0.85, base.defend + 0.12 * tilt),
+    threeBet: base.threeBet + 0.05 * tilt, bluff: base.bluff + 0.12 * tilt, barrel: Math.min(1, base.barrel + 0.15 * tilt),
+    margin: base.margin - 0.05 * tilt, fear: base.fear * (1 - 0.3 * tilt), foldBig: base.foldBig * (1 - 0.5 * tilt),
+  } : base;
   const unit = game.sb >= 100 ? 100 : 1;
   const pot = game.potTotal();
   const toCall = la.toCall;
@@ -129,113 +203,166 @@ export function botDecide(game, seat, opts = {}) {
   const stack = p.chips + p.bet;
   const free = la.canCheck;
 
-  const shove = { type: 'allin' };
-  const sized = (target) => {
+  const tagged = (d, tag) => { d.tag = tag; return d; };
+  const shove = (tag) => (la.canRaise ? tagged({ type: 'allin' }, tag) : call(tag));
+  const sized = (target, tag) => {
+    if (!la.canRaise) return call(tag);
     target = roundTo(target, unit);
     target = Math.min(la.maxRaiseTo, Math.max(la.minRaiseTo, target));
-    if (target >= la.maxRaiseTo * 0.8) return shove; // committing most of the stack anyway
-    return { type: 'raise', amount: target };
+    if (target >= la.maxRaiseTo * 0.8) return tagged({ type: 'allin' }, tag); // committing most of the stack anyway
+    return tagged({ type: 'raise', amount: target }, tag);
   };
-  const call = () => (free ? { type: 'check' } : { type: 'call' });
-  const foldOrCheck = () => (free ? { type: 'check' } : { type: 'fold' }); // never fold when checking is free
+  function call(tag = 'call') { return tagged(free ? { type: 'check' } : { type: 'call' }, tag); }
+  const check = (tag = 'check') => tagged({ type: 'check' }, tag);
+  const foldOrCheck = () => (free ? check() : tagged({ type: 'fold' }, 'fold')); // never fold when checking is free
+  const jitter = () => 0.9 + random() * 0.2;
 
   // ======================= PREFLOP =======================
   if (game.phase === 'preflop') {
-    const pct = handPercentile(p.hole) + (random() - 0.5) * 0.05; // a little randomness around range edges
-    // position: how many players still to act behind us (fewer = later position = wider)
+    const pct = handPercentile(p.hole) + (random() - 0.5) * st.noise;
     const behind = game.actors().filter((o) => o !== p && !o.acted && o.seat !== seat).length;
-    const posAdj = behind <= 1 ? 0.07 : behind === 2 ? 0.03 : behind >= 4 ? -0.03 : 0;
+    const posAdj = (behind <= 1 ? 0.07 : behind === 2 ? 0.03 : behind >= 4 ? -0.03 : 0) * st.posSense;
     const raiseLevel = game.currentBet / game.bb; // 1 = unraised
     const limpers = live.filter((o) => o !== p && o.bet >= game.bb && o.seat !== game.bbSeat).length;
+    const openTo = () => game.bb * (pick(st.openSize, random) * jitter() + limpers);
 
     if (raiseLevel <= 1) {
-      // unraised pot
-      if (pct < st.pfr + posAdj && la.canRaise) return sized(game.bb * (2.5 + random() * 0.7) + limpers * game.bb);
+      // trappers sometimes just limp/check their monsters
+      if (pct < 0.035 && random() < st.trapPre) return call('trap');
+      if (la.canRaise && pct < st.pfShove * 0.5 && random() < 0.5) return shove('shove');
+      if (pct < st.open + posAdj && la.canRaise) {
+        if (free && random() > st.raiseOption + 0.4) return check('check');
+        return sized(openTo(), pct < st.open * 0.5 ? 'value' : 'open');
+      }
       if (free) {
-        if (la.canRaise && pct < st.pfr * 0.8 && random() < 0.6) return sized(game.bb * (3 + limpers));
-        return { type: 'check' };
+        if (la.canRaise && random() < st.raiseOption * 0.35 && pct < st.vpip) return sized(openTo(), 'bluff'); // raise the option light
+        return check();
       }
       const isSB = seat === game.sbSeat;
-      const limpRange = st.vpip + posAdj + (isSB ? 0.12 : 0) + (limpers ? 0.04 : 0);
+      const limpRange = st.vpip + posAdj + (isSB ? 0.1 : 0) + (limpers ? 0.04 : 0);
       if (pct < limpRange) {
-        // loose players limp, tighter players prefer raise-or-fold
-        if (la.canRaise && random() > st.limp + (limpers ? 0.3 : 0) && !isSB) return sized(game.bb * (2.5 + random() * 0.5) + limpers * game.bb);
-        return call();
+        if (la.canRaise && random() > st.limp + (limpers ? 0.25 : 0) && !isSB && pct < st.open + 0.25) return sized(openTo(), 'open');
+        return call('limp');
       }
       return foldOrCheck();
     }
 
     // facing a raise
     const potOdds = toCall / (pot + toCall);
-    const shrink = Math.min(0.9, Math.max(0.22, 2.6 / raiseLevel)); // bigger raises -> narrower calling range
-    // the more often the raiser raises, the weaker his range: fight back with wider calls / 3-bets
+    const sizeSense = st.fear >= 1 ? 1 : st.fear < 0.5 ? 0.45 : 0.8;    // stations ignore raise size
+    const shrink = clamp(Math.pow(2.6 / raiseLevel, sizeSense), 0.22, 0.95);
     const vill = villainProfile(game.seats[game.lastAggressor]);
-    const loosen = Math.min(2.2, Math.max(0.8, Math.pow(vill.pfr / 0.17, 0.7)));
-    let callRange = st.vpip * shrink * loosen + posAdj * 0.5;
-    if (seat === game.bbSeat && potOdds < 0.36) callRange += 0.08; // defend the big blind
-    const threeBet = st.threeBet * (raiseLevel > 6 ? 0.5 : 1) * loosen;
-    const deep = toCall > stack * 0.35; // calling would commit a big part of the stack
+    const loosen = clamp(Math.pow(vill.pfr / 0.17, 0.7), 0.8, 2.2);  // fight back vs. frequent raisers
+    let callRange = st.defend * shrink * loosen + posAdj * 0.5;
+    if (seat === game.bbSeat && potOdds < 0.36) callRange += 0.06 + (st.callsDown ? 0.1 : 0);
+    const reRaise = game.streetRaises >= 2;
+    const threeBet = (reRaise ? st.fourBet : st.threeBet) * (raiseLevel > 6 ? 0.6 : 1) * loosen;
+    const deep = toCall > stack * 0.35;
     if (la.canRaise && pct < threeBet) {
-      if (deep || raiseLevel > 12) return shove;
-      return sized(game.currentBet * (2.8 + random() * 0.6));
+      if (pct < 0.03 && random() < st.trapPre && !deep) return call('trap'); // flat AA/KK to trap
+      if (deep || raiseLevel > 12) return shove('value');
+      return sized(game.currentBet * pick(st.threeBetSize, random) * jitter(), 'value');
     }
-    // light 3-bet bluffs with hands just outside the calling range
-    if (la.canRaise && !deep && raiseLevel < 5 && pct > callRange && pct < callRange + 0.12 && random() < st.bluff * 0.3) {
-      return sized(game.currentBet * 3);
+    if (la.canRaise && !deep && raiseLevel < 6 && pct > callRange && pct < callRange + 0.15 && random() < st.lightThreeBet * (reRaise ? 0.3 : 1)) {
+      return sized(game.currentBet * pick(st.threeBetSize, random), 'bluff');
     }
-    if (deep) return pct < Math.max(threeBet * 1.6, 0.04) ? call() : foldOrCheck();
+    if (la.canRaise && st.pfShove && !deep && raiseLevel < 5 && pct < 0.3 && random() < st.pfShove) return shove('bluff');
+    if (deep) return pct < Math.max(threeBet * 1.6, st.callsDown ? 0.07 : 0.04) ? call() : foldOrCheck();
     if (pct < callRange) return call();
     return foldOrCheck();
   }
 
   // ======================= POSTFLOP =======================
   const iters = opts.iters ?? (nOpp <= 2 ? 900 : nOpp <= 4 ? 650 : 450);
-  // what each opponent could hold given how they played preflop
-  const ranges = live.filter((o) => o !== p).map((o) => (o.seat === game.preflopAggressor ? 0.25 : o.voluntary ? 0.5 : 1));
-  const eq = estimateEquity(p.hole, game.board, nOpp, iters, random, ranges);
+  // each opponent's likely holdings from how they played preflop, scaled by what we've seen of them
+  const ranges = live.filter((o) => o !== p).map((o) => {
+    const v = villainProfile(o);
+    if (o.seat === game.preflopAggressor) return clamp(v.pfr * 1.4, 0.12, 0.6);
+    return o.voluntary ? clamp(v.vpip * 1.4, 0.3, 0.9) : 1;
+  });
+  const eqRaw = estimateEquity(p.hole, game.board, nOpp, iters, random, ranges);
+  const eq = clamp(eqRaw + (random() - 0.5) * st.noise + tilt * 0.04, 0, 1);
   const outs = drawOuts(p.hole, game.board);
+  const madeCat = evaluate([...p.hole, ...game.board]) >> 20;
+  const boardCat = evaluate(game.board) >> 20;
+  const madeHand = madeCat >= 1 && madeCat > boardCat; // pair or better that uses a hole card
   const fair = 1 / (nOpp + 1);
   const valueT = Math.pow(fair, 0.72 - st.margin);   // HU ≈ 0.61, 3-way ≈ 0.45
   const strongT = Math.pow(fair, 0.42 - st.margin);  // HU ≈ 0.75, 3-way ≈ 0.63
-  const r = random();
-  const betPot = (frac) => sized(game.currentBet + (pot + toCall) * frac);
   const river = game.phase === 'river';
+  const potAfterCall = pot + toCall;
+  const betFrac = (frac, tag) => sized(game.currentBet + potAfterCall * frac, tag);
+  // personality bet sizing: from its size menu, sometimes overbet / shove
+  const betSize = (tag, strong) => {
+    const r = random();
+    if (strong && r < st.shove) return shove(tag);
+    if ((strong || tag === 'bluff') && r < st.shove + st.overbet) return betFrac(1.2 + random() * 0.8, tag);
+    return betFrac(pick(st.sizes, random) * jitter(), tag);
+  };
+  const raiseTo = (mult, tag) => sized(game.currentBet * mult * jitter() + (pot - game.currentBet) * 0.25, tag);
+  const checkedThisStreet = p.lastAction === '过牌';
+  const headsUp = nOpp === 1;
 
   if (free) {
-    if (!la.canRaise) return { type: 'check' };
-    if (eq > strongT) return r < 0.82 ? betPot(0.55 + random() * 0.35) : { type: 'check' }; // occasional slow-play
-    if (eq > valueT) return r < 0.72 ? betPot(0.45 + random() * 0.25) : { type: 'check' };
-    // continuation bet as the preflop raiser (flop) / barrel as last street's aggressor (turn)
-    const cbetSpot = (game.phase === 'flop' && game.preflopAggressor === seat) || (game.phase === 'turn' && game.prevAggressor === seat && random() < 0.55);
-    if (cbetSpot && game.streetRaises === 0 && random() < st.cbet * (nOpp === 1 ? 1 : nOpp === 2 ? 0.7 : 0.4)) return betPot(0.33 + random() * 0.3);
-    if (outs >= 8 && random() < 0.45 + st.bluff) return betPot(0.5 + random() * 0.2); // semi-bluff
-    if (nOpp <= 2 && random() < st.bluff * (river ? 0.7 : 1)) return betPot(0.4 + random() * 0.3); // bluff
-    return { type: 'check' };
+    if (!la.canRaise) return check();
+    if (eq > strongT) {
+      const sp = river ? st.slowplay * 0.45 : st.slowplay;
+      if (random() < sp) return check('slowplay');
+      return betSize('value', true);
+    }
+    if (eq > valueT) return random() < st.betValue ? betSize('value', false) : check(st.slowplay > 0.3 ? 'slowplay' : 'check');
+    const cbetSpot = game.phase === 'flop' && game.preflopAggressor === seat && game.streetRaises === 0;
+    const barrelSpot = !cbetSpot && game.prevAggressor === seat;
+    const multiway = headsUp ? 1 : nOpp === 2 ? 0.7 : 0.4;
+    const air = madeHand || outs >= 8 ? 1 : st.airMult;
+    if (cbetSpot && random() < st.cbet * multiway * air) return betSize(madeHand ? 'cbet' : 'bluff', false);
+    if (barrelSpot && random() < st.barrel * multiway * air * (river ? 0.8 : 1)) return betSize(madeHand ? 'barrel' : 'bluff', false);
+    if (outs >= 8 && random() < st.semiBluff) return betSize('semibluff', false);
+    if (eq > fair * 1.15 && random() < st.betMedium) return betFrac(pick(st.sizes, random) * 0.8, 'thin');
+    if ((headsUp || st.bluff > 0.3) && random() < st.bluff * (river ? 0.8 : 1) * multiway) return betSize('bluff', false);
+    return check();
   }
 
-  // facing a bet
-  const potOdds = toCall / (pot + toCall);
+  // ---------- facing a bet ----------
+  const potOdds = toCall / potAfterCall;
   const pressure = Math.min(1.5, toCall / Math.max(pot - toCall, 1)); // bet size relative to the pot before it
   const raisedAgain = game.streetRaises >= 2;
-  // a bettor's range is stronger than their preflop range: discount equity by bet size / re-raises
-  const eAdj = eq * (1 - (0.15 * pressure + (raisedAgain ? 0.1 : 0)) * Math.min(1, 0.3 / villainProfile(game.seats[game.lastAggressor]).aggr));
-  // ...unless this bettor bets all the time (then his bets mean less)
   const villAggr = villainProfile(game.seats[game.lastAggressor]).aggr;
-  const trust = Math.min(1.2, Math.max(0.25, 0.3 / villAggr));
-  const betRange = (0.08 + (river ? 0.04 : 0)) * trust - (1 - Math.min(1, trust)) * 0.04;
-  const drawEq = river ? 0 : Math.min(0.5, outs * (game.phase === 'flop' ? 0.04 : 0.022) + 0.04); // + implied odds
-  const commit = toCall > (p.chips) * 0.5 ? 0.05 : 0;
+  const trust = clamp(0.3 / villAggr, 0.25, 1.2);
+  // a bettor's range is stronger than his preflop range: discount equity by bet size / re-raises (scaled by fear)
+  const eAdj = eq * (1 - (0.15 * pressure + (raisedAgain ? 0.1 : 0)) * Math.min(1, trust) * st.fear);
+  const betRange = ((0.08 + (river ? 0.04 : 0)) * trust - (1 - Math.min(1, trust)) * 0.04) * st.fear;
+  const drawEq = river ? 0 : Math.min(0.5, outs * (game.phase === 'flop' ? 0.04 : 0.022) + 0.04) + (outs >= 4 ? st.chase : 0);
+  const commit = toCall > p.chips * 0.5 ? 0.05 * st.fear : 0;
+  const crBoost = checkedThisStreet ? st.checkRaise : 0;
 
-  if (la.canRaise && eAdj > strongT && !raisedAgain) return r < 0.6 ? sized(game.currentBet * (2.5 + random() * 0.7)) : call();
-  if (la.canRaise && eAdj > strongT && raisedAgain && eAdj > 0.8) return shove;
+  if (eAdj > strongT) {
+    if (raisedAgain && eAdj > 0.8) return st.raiseValue > 0.3 ? shove('value') : call('value');
+    // trappers flat the flop with monsters and spring the trap later
+    if (!checkedThisStreet && game.phase === 'flop' && random() < st.slowplay * 0.5) return call('slowplay');
+    if (!raisedAgain && random() < Math.min(0.95, st.raiseValue + crBoost)) return raiseTo(pick([2.5, 3, 3.5], random) + (st.overbet > 0.15 ? random() : 0), checkedThisStreet ? 'checkraise' : 'value');
+    return call('value');
+  }
+  if (eAdj > valueT && !raisedAgain && random() < st.raiseLight + crBoost * 0.35) {
+    return raiseTo(2.6 + random() * 0.8, checkedThisStreet ? 'checkraise' : 'value');
+  }
+  // tight players give up without a strong hand when the pressure is big
+  const bigBet = pressure >= 0.6 || raisedAgain;
+  if (bigBet && st.foldBig && eAdj < valueT && random() < st.foldBig && !(outs >= 8 && drawEq >= potOdds)) return tagged({ type: 'fold' }, 'fold');
   if (eAdj >= potOdds + betRange + st.margin + commit) return call();
   if (outs >= 8 && Math.max(drawEq, eAdj) >= potOdds + commit) {
-    if (la.canRaise && nOpp === 1 && !raisedAgain && random() < st.bluff * 1.5) return sized(game.currentBet * 2.8); // semi-bluff raise
-    return call();
+    if (la.canRaise && headsUp && !raisedAgain && random() < st.semiBluff * 0.25 + crBoost * 0.3) return raiseTo(2.8, checkedThisStreet ? 'checkraise' : 'semibluff');
+    return call('draw');
   }
+  // calling stations: any pair is good enough, and they peel with overcards
+  if (st.callsDown && (madeHand || (outs >= 4 && !river)) && pressure <= (madeHand ? 1.25 : 0.6)) return call('station');
+  if (st.callsDown && !river && pressure <= 0.4 && random() < st.float) return call('float');
   // float small bets heads-up (bluff-catch / take it away later)
-  if (!river && nOpp === 1 && pressure <= 0.6 && random() < st.float) return call();
-  // pure bluff-raise, rare
-  if (la.canRaise && !river && nOpp === 1 && !raisedAgain && pressure <= 0.5 && random() < st.bluff * 0.25) return sized(game.currentBet * 3);
-  return { type: 'fold' };
+  if (!river && headsUp && pressure <= 0.7 && random() < st.float) return call('float');
+  // bluff-raises: maniacs any street, tricksters mostly on the river or as a check-raise
+  if (la.canRaise && headsUp && !raisedAgain && pressure <= 0.8) {
+    const br = st.bluffRaise * (river ? 1 : st.bluff > 0.3 ? 0.8 : 0.35) + (checkedThisStreet ? st.checkRaise * 0.08 : 0);
+    if (random() < br) return raiseTo(2.6 + random(), checkedThisStreet ? 'checkraise' : 'bluff');
+  }
+  return tagged({ type: 'fold' }, 'fold');
 }

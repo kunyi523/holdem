@@ -1,19 +1,24 @@
-// Network-first service worker: always tries fresh files, falls back to cache when offline.
-const CACHE = 'holdem-v2';
-const ASSETS = ['./', './index.html', './css/style.css', './js/app.js', './js/engine.js', './js/cards.js', './js/evaluator.js',
-  './js/pots.js', './js/bot.js', './js/preflop.js', './js/controller.js', './js/net.js', './vendor/peerjs.min.js', './manifest.webmanifest'];
+// Network-first service worker: always revalidates (ETag) so a redeploy shows up immediately; cache = offline fallback.
+const CACHE = 'holdem-v3';
+const V = '?v=3';
+const ASSETS = ['./', './index.html', './css/style.css' + V, './js/app.js' + V, './js/engine.js' + V, './js/cards.js' + V, './js/evaluator.js' + V,
+  './js/pots.js' + V, './js/bot.js' + V, './js/preflop.js' + V, './js/controller.js' + V, './js/net.js' + V, './js/handinfo.js' + V, './js/sound.js' + V,
+  './vendor/peerjs.min.js', './manifest.webmanifest'];
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).catch(() => {}).then(() => self.skipWaiting()));
 });
-self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener('activate', (e) => e.waitUntil(
+  caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())
+));
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
   e.respondWith(
-    fetch(req).then((res) => {
+    // (a navigation Request can't be re-initialised with options, so fetch its URL instead)
+    (req.mode === 'navigate' ? fetch(req.url, { cache: 'no-cache' }) : fetch(req, { cache: 'no-cache' })).then((res) => {
       const copy = res.clone();
-      caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+      if (res.ok) caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
       return res;
-    }).catch(() => caches.match(req, { ignoreSearch: true }).then((r) => r || caches.match('./index.html')))
+    }).catch(() => caches.match(req).then((r) => r || caches.match(req, { ignoreSearch: true })).then((r) => r || caches.match('./index.html')))
   );
 });

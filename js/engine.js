@@ -1,7 +1,8 @@
 // Authoritative No-Limit Texas Hold'em engine (runs on the host / in single-player).
-import { newDeck, shuffle, cryptoRandInt } from './cards.js';
-import { evaluate, describeScore } from './evaluator.js';
-import { computePots, splitPot } from './pots.js';
+import { newDeck, shuffle, cryptoRandInt } from './cards.js?v=3';
+import { evaluate, describeScore } from './evaluator.js?v=3';
+import { computePots, splitPot } from './pots.js?v=3';
+import { updateTilt } from './bot.js?v=3';
 
 export const STARTING_CHIPS = 100000;
 export const MAX_SEATS = 8;
@@ -52,6 +53,7 @@ export class Game {
       lastAction: '', showCards: false, score: 0, handName: '',
       stats: { hands: 0, vpip: 0, pfr: 0, postActs: 0, postAggr: 0 }, // observed tendencies (for the AI)
       pfRaised: false,
+      tilt: 0, handStart: 0, lastNet: 0,
     };
     this.seats[seat] = p;
     return p;
@@ -114,6 +116,7 @@ export class Game {
       if (!p) continue;
       p.hole = []; p.bet = 0; p.totalBet = 0; p.allIn = false; p.acted = false;
       p.lastAction = ''; p.showCards = false; p.score = 0; p.handName = ''; p.voluntary = false; p.pfRaised = false;
+      p.handStart = p.chips;
       p.inHand = this.isEligible(p);
       p.folded = !p.inHand;
     }
@@ -376,6 +379,12 @@ export class Game {
       p.bet = 0;
       p.totalBet = 0; // pot has been paid out
       if (p.inHand && p.stats) { p.stats.hands++; if (p.voluntary) p.stats.vpip++; if (p.pfRaised) p.stats.pfr++; }
+      p.lastNet = p.inHand ? p.chips - p.handStart : 0;
+      if (p.isBot) {
+        const before = p.tilt || 0;
+        updateTilt(p, p.lastNet, this.bb);
+        if (p.tilt >= 0.5 && before < 0.5) this.emit(`😤 ${p.name} 输了个大锅，有点上头了…`, 'info');
+      }
       if (p.inHand && p.chips === 0) this.emit(`${p.name} 筹码输光，出局（房主可补码）`, 'bust');
     }
     for (let i = 0; i < MAX_SEATS; i++) {
@@ -421,6 +430,9 @@ export class Game {
           seat: p.seat, name: p.name, chips: p.chips, bet: p.bet, totalBet: p.totalBet,
           folded: p.folded, allIn: p.allIn, inHand: p.inHand, isBot: p.isBot,
           connected: p.connected, sittingOut: p.sittingOut, lastAction: p.lastAction,
+          style: p.isBot ? p.botStyle : null, tilt: p.isBot ? Math.round((p.tilt || 0) * 100) / 100 : 0,
+          lastNet: p.lastNet || 0,
+          stats: p.stats ? { h: p.stats.hands, v: p.stats.vpip, p: p.stats.pfr, a: p.stats.postAggr, n: p.stats.postActs } : null,
           hasCards: p.hole.length > 0 && p.inHand,
           cards: visible ? [...p.hole] : null,
           handName: visible && p.showCards ? p.handName : '',

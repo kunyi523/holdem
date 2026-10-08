@@ -6,7 +6,7 @@ const { botDecide } = await import(process.env.BOT || '../js/bot.js');
 const HANDS = Number(process.argv[2] || 1000);
 const g = new Game({ sb: 500, bb: 1000 });
 g.addPlayer(0, { id: 'h', name: 'Human' });
-[['粉哥', 'loose'], ['Micheal', 'tight'], ['Grok Bot', 'balanced'], ['阿杰', 'loose'], ['Lucy', 'tight']].forEach(([n, s], i) => g.addPlayer(i + 1, { id: 'b' + i, name: n, isBot: true, botStyle: s }));
+[['粉哥', 'maniac'], ['Micheal', 'rock'], ['Grok Bot', 'tricky'], ['小龙', 'station'], ['阿杰', 'regular']].forEach(([n, s], i) => g.addPlayer(i + 1, { id: 'b' + i, name: n, isBot: true, botStyle: s }));
 const S = {};
 const st = (k) => (S[k] = S[k] || { pfVsRaise: 0, pfFold: 0, postVsBet: 0, postFold: 0, free: 0, freeFold: 0 });
 let humanWon = 0, humanHands = 0, uncontested = 0;

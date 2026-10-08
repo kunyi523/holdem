@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0b2416">
+<meta name="theme-color" content="#07130d">
 <meta name="description" content="免费网页版德州扑克（无限注）朋友局 · 仅限娱乐筹码，非真钱">
 <title>德州扑克 · 朋友局</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%99%A0%EF%B8%8F%3C/text%3E%3C/svg%3E">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="css/style.css?v=2">
+<link rel="stylesheet" href="css/style.css?v=3">
 </head>
 <body>
 <!-- ============ 大厅 Lobby ============ -->
@@ -16,11 +16,11 @@
   <div class="lobby-inner">
     <div class="hero">
       <div class="hero-cards" aria-hidden="true">
-        <div class="card hero-c c1 s0"><span class="ci"><b>A</b><i>♠</i></span><span class="cc">♠</span></div>
-        <div class="card hero-c c2 s1"><span class="ci"><b>K</b><i>♥</i></span><span class="cc face">K</span></div>
-        <div class="card hero-c c3 s2"><span class="ci"><b>Q</b><i>♦</i></span><span class="cc face">Q</span></div>
+        <div class="card big hero-c c1 s0"><span class="ci"><b>A</b><i>♠&#xFE0E;</i></span><span class="cc ace">♠&#xFE0E;</span><span class="ci ci2"><b>A</b><i>♠&#xFE0E;</i></span></div>
+        <div class="card big hero-c c2 s1"><span class="ci"><b>K</b><i>♥&#xFE0E;</i></span><span class="court"><b>K</b><i>♚&#xFE0E;</i></span><span class="ci ci2"><b>K</b><i>♥&#xFE0E;</i></span></div>
+        <div class="card big hero-c c3 s2"><span class="ci"><b>Q</b><i>♦&#xFE0E;</i></span><span class="court"><b>Q</b><i>♛&#xFE0E;</i></span><span class="ci ci2"><b>Q</b><i>♦&#xFE0E;</i></span></div>
       </div>
-      <div class="hero-chips" aria-hidden="true"><i class="chip-d d1000"></i><i class="chip-d d5000"></i><i class="chip-d d25000"></i></div>
+      <div class="hero-chips" aria-hidden="true"><i class="chip-d d1000"></i><i class="chip-d d5000"></i><i class="chip-d d25000" data-v="25K"></i></div>
       <h1 class="logo"><span class="logo-main">德州扑克</span><span class="logo-sub">HOLD'EM · 朋友局</span></h1>
       <p class="subtitle">无限注德州扑克 · 每人 <b>100,000</b> 虚拟筹码<br><span class="muted">仅供娱乐 · 筹码无任何价值 · 不涉及真钱</span></p>
     </div>
@@ -44,17 +44,16 @@
       <button id="btn-host" class="btn primary wide">创建房间</button>
     </section>
 
-    <section class="card-panel">
+    <section class="card-panel" id="solo-panel">
       <h2><span class="ic">🤖</span>单机练习（对战 AI）</h2>
-      <div class="row">
-        <label class="inline">AI 数量
-          <select id="solo-bots">
-            <option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option><option>7</option>
-          </select>
-        </label>
+      <p class="muted small">每个 AI 都有自己的性格，点性格可以切换。无需联网。</p>
+      <div id="solo-lineup" class="lineup"></div>
+      <div class="row lineup-ctl">
+        <button id="btn-bot-minus" class="btn ghost-btn" aria-label="减少 AI">－</button>
+        <span id="bot-count" class="bot-count">4 个 AI</span>
+        <button id="btn-bot-plus" class="btn ghost-btn" aria-label="增加 AI">＋</button>
         <button id="btn-solo" class="btn green">开始单机</button>
       </div>
-      <p class="muted small">粉哥 🌸 松凶 · Micheal 🎩 紧 · Grok Bot 🤖 平衡 …… 无需联网。</p>
     </section>
 
     <p id="lobby-msg" class="lobby-msg"></p>
@@ -71,12 +70,14 @@
       <div id="blind-label" class="blind-label"></div>
     </div>
     <span id="net-dot" class="net-dot" title="连接状态"></span>
+    <button id="btn-log" class="icon-btn" aria-label="牌局记录" title="牌局记录">📜</button>
+    <button id="btn-mute" class="icon-btn" aria-label="音效">🔊</button>
     <button id="btn-invite" class="btn small-btn">邀请</button>
   </header>
   <div id="banner" class="banner hidden"></div>
   <div id="table-wrap">
     <div id="table">
-      <div class="rail"><div class="felt"><div class="felt-line"></div><div class="felt-logo"><span>♠</span> 朋友局 <span>♥</span></div></div></div>
+      <div class="rail"><div class="felt"><div class="felt-light"></div><div class="felt-line"></div><div class="felt-logo"><span class="fl-suits">♠ ♥ ♣ ♦</span><span class="fl-name">HOLD'EM</span><span class="fl-sub">朋友局</span></div></div></div>
       <div id="pot" class="pot"></div>
       <div id="center">
         <div id="board" class="board"></div>
@@ -94,6 +95,6 @@
 <div id="toast" class="toast"></div>
 
 <script src="vendor/peerjs.min.js"></script>
-<script type="module" src="js/app.js?v=2"></script>
+<script type="module" src="js/app.js?v=3"></script>
 </body>
 </html>

@@ -1,10 +1,13 @@
 // Host-side controller: owns the authoritative Game, drives bots, timers, hand scheduling.
-import { Game, STARTING_CHIPS } from './engine.js';
-import { botDecide } from './bot.js';
+import { Game, STARTING_CHIPS } from './engine.js?v=3';
+import { botDecide, resolveStyle, STYLE_KEYS, PERSONALITIES } from './bot.js?v=3';
 
 export const BOT_NAMES = ['粉哥', 'Micheal', 'Grok Bot', '小龙', '阿杰', 'Lucy', '老王', '阿May'];
-const STYLE_BY_NAME = { '粉哥': 'loose', 'Micheal': 'tight', 'Grok Bot': 'balanced' };
-const STYLES = ['loose', 'tight', 'balanced'];
+// default personality per AI seat (the host can change it in the menu / lobby)
+export const STYLE_BY_NAME = { '粉哥': 'maniac', 'Micheal': 'rock', 'Grok Bot': 'tricky', '小龙': 'station', '阿杰': 'regular', 'Lucy': 'tricky', '老王': 'station', '阿May': 'maniac' };
+export const defaultStyleFor = (name, i = 0) => STYLE_BY_NAME[name] || STYLE_KEYS[i % STYLE_KEYS.length];
+// thinking time (ms) per personality: maniacs snap-act, rocks take their time, tricksters tank before traps
+const TEMPO = { maniac: [350, 700], rock: [800, 900], station: [550, 700], tricky: [600, 1300], regular: [550, 900] };
 
 let uidSeq = 0;
 const uid = (p) => `${p}-${Date.now().toString(36)}-${(uidSeq++).toString(36)}`;
@@ -37,17 +40,27 @@ export class HostController {
     return seat;
   }
 
-  addBot(name) {
+  addBot(name, style) {
     const seat = this.freeSeat();
     if (seat < 0) return -1;
     const used = new Set(this.game.seats.filter(Boolean).map((p) => p.name));
     if (!name) name = BOT_NAMES.find((n) => !used.has(n)) || `机器人${seat + 1}`;
-    const botStyle = STYLE_BY_NAME[name] || STYLES[Math.floor(Math.random() * STYLES.length)];
+    const botStyle = style && PERSONALITIES[style] ? style : defaultStyleFor(name, seat);
     this.game.addPlayer(seat, { id: uid('bot'), name, isBot: true, botStyle });
-    this.game.emit(`🤖 ${name} 入座`);
+    this.game.emit(`🤖 ${name}（${PERSONALITIES[botStyle].label}）入座`);
     this.changed();
     this.kick();
     return seat;
+  }
+
+  setBotStyle(seat, style) {
+    const p = this.game.seats[seat];
+    if (!p || !p.isBot || !PERSONALITIES[style] || resolveStyle(p.botStyle) === style) return false;
+    p.botStyle = style;
+    p.tilt = 0;
+    this.game.emit(`${p.name} 换成了「${PERSONALITIES[style].label}」打法`);
+    this.after();
+    return true;
   }
 
   seatOf(id) { const p = this.game.seats.find((s) => s && s.id === id); return p ? p.seat : -1; }
@@ -106,6 +119,8 @@ export class HostController {
   startHand() {
     if (!this.running || this.game.isBetting()) return;
     if (this.pendingBlinds) { this.game.setBlinds(this.pendingBlinds.sb, this.pendingBlinds.bb); this.pendingBlinds = null; }
+    // busted AIs reload automatically so the table never runs dry
+    for (const p of this.game.seats) if (p && p.isBot && p.chips === 0) this.game.rebuy(p.seat, STARTING_CHIPS);
     if (!this.game.canStart()) { this.changed(); return; }
     this.game.startHand();
     this.after();
@@ -132,7 +147,13 @@ export class HostController {
       const p = g.seats[g.toAct];
       const seat = g.toAct, hand = g.handNo;
       if (p.isBot) {
-        this.botTimer = setTimeout(() => this.botMove(seat, hand), 500 + Math.random() * 900);
+        // decide now, act after a personality-dependent "thinking" pause (longer before big moves)
+        let d = null;
+        try { d = botDecide(g, seat); } catch (e) { console.error(e); }
+        const [base, spread] = TEMPO[resolveStyle(p.botStyle)] || TEMPO.regular;
+        const big = d && (d.type === 'allin' || d.tag === 'checkraise' || (d.type === 'raise' && g.streetRaises >= 1));
+        const delay = this.fast ? 0 : base + Math.random() * spread + (big ? 500 + Math.random() * 700 : 0);
+        this.botTimer = setTimeout(() => this.botMove(seat, hand, d), delay);
       } else if (!p.connected || p.sittingOut) {
         this.botTimer = setTimeout(() => this.autoAct(seat, hand, false), 600);
       } else {
@@ -143,12 +164,13 @@ export class HostController {
     this.changed();
   }
 
-  botMove(seat, hand) {
+  botMove(seat, hand, planned) {
     const g = this.game;
     if (g.toAct !== seat || g.handNo !== hand) return;
-    let d;
-    try { d = botDecide(g, seat); } catch (e) { console.error(e); }
+    let d = planned;
+    if (!d) { try { d = botDecide(g, seat); } catch (e) { console.error(e); } }
     let r = d ? g.act(seat, d) : { ok: false };
+    if (!r.ok && planned) { try { d = botDecide(g, seat); r = d ? g.act(seat, d) : r; } catch (e) { console.error(e); } }
     if (!r.ok) r = g.act(seat, { type: g.legal(seat)?.canCheck ? 'check' : 'fold' });
     this.after();
   }
