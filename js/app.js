@@ -587,7 +587,7 @@ function renderSeats(v, isHost, win) {
     const showdownLoser = win && p.cards && !win.seats.has(i) && p.inHand && !p.folded;
     const tilted = p.isBot && p.tilt >= 0.5;
     const cls = ['seat', side, me && 'me', active && 'active', active && p.isBot && 'thinking', p.inHand && p.folded && 'folded',
-      (out || p.sittingOut || !p.connected) && 'out', isWin && 'winner', showdownLoser && 'loser', tilted && 'tilt'].filter(Boolean).join(' ');
+      (out || p.sittingOut || !p.connected) && 'out', isWin && 'winner', showdownLoser && 'loser', tilted && 'tilt', p.cards && !me && p.hasCards && 'shown'].filter(Boolean).join(' ');
     let hole = '';
     if (p.hasCards && !me) {
       if (p.cards) {
@@ -757,13 +757,14 @@ function heroStrengthHTML(v, me) {
   if (!hi) return '';
   const nOpp = Math.max(1, v.seats.filter((p) => p && p.inHand && !p.folded && p.seat !== S.mySeat).length);
   const key = `${me.cards.join(',')}|${v.board.join(',')}|${nOpp}`;
-  if (eqCache.key !== key) eqCache = { key, eq: quickEquity(me.cards, v.board, nOpp, v.board.length ? 500 : 350) };
+  const live = BETTING.includes(v.phase);
+  if (live && eqCache.key !== key) eqCache = { key, eq: quickEquity(me.cards, v.board, nOpp, v.board.length ? 500 : 350) };
   const pct = Math.round(eqCache.eq * 100);
   return `<div class="hs tier${hi.tier}">
       <div class="hs-label">${esc(hi.label)}</div>
       ${hi.sub ? `<div class="hs-sub">${esc(hi.sub)}</div>` : ''}
-      <div class="meter" title="对 ${nOpp} 名对手的大致胜率"><i style="width:${pct}%"></i></div>
-      <div class="eq">胜率≈${pct}% <span>vs ${nOpp}人</span></div>
+      ${live ? `<div class="meter" title="对 ${nOpp} 名对手的大致胜率"><i style="width:${pct}%"></i></div>
+      <div class="eq">胜率≈${pct}% <span>vs ${nOpp}人</span></div>` : ''}
     </div>`;
 }
 
