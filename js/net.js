@@ -5,7 +5,7 @@
 //    (see relay.js). Works on any network that can open https pages.
 // The host listens on both. A joining client tries direct first and starts the relay ~2.5 s later
 // (or immediately if direct errors); whichever opens first wins.
-import { relayHost, relayJoin, genKey, validKey } from './relay.js?v=4';
+import { relayHost, relayJoin, genKey, validKey } from './relay.js?v=5';
 
 const PREFIX = 'kunyi-holdem-v1-';
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -85,13 +85,20 @@ export function hostRoom(handlers) {
     const t = setTimeout(() => { if (!peerSettled) { peerSettled = true; maybeReady(); } }, 7000);
     p.on('open', () => { clearTimeout(t); net.direct = true; emit(); if (!peerSettled) { peerSettled = true; maybeReady(); } });
     p.on('connection', (conn) => { conn.transport = 'direct'; handlers.onConnection(conn); });
-    p.on('disconnected', () => {
-      net.direct = false; emit();
-      setTimeout(() => { if (!p.destroyed && !destroyed) { try { p.reconnect(); } catch (e) { /* ignore */ } } }, 2000);
-    });
+    // signalling socket lost (phone slept / network switch): keep trying until it is back
+    let backoff = 2000;
+    const retry = () => {
+      if (p.destroyed || destroyed || !p.disconnected) return;
+      try { p.reconnect(); } catch (e) { /* ignore */ }
+      backoff = Math.min(backoff * 1.6, 30000);
+      setTimeout(retry, backoff);
+    };
+    p.on('disconnected', () => { net.direct = false; emit(); backoff = 2000; setTimeout(retry, backoff); });
+    p.on('open', () => { backoff = 2000; });
     p.on('error', (err) => {
       if (err.type === 'unavailable-id' && !ready && attempt < 4) { p.destroy(); clearTimeout(t); code = genCode(); startPeer(attempt + 1); return; }
       if (err.type === 'peer-unavailable') return;
+      if (err.type === 'unavailable-id' && ready) { console.warn('room id lost on the signalling server; relay keeps working'); return; }
       console.warn('peer error', err.type, err.message);
       if (!peerSettled) { clearTimeout(t); peerSettled = true; maybeReady(); }
     });

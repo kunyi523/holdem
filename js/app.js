@@ -1,29 +1,42 @@
 // UI + session management (single-player / host / client).
-import { HostController } from './controller.js?v=4';
-import { hostRoom, joinRoom, errText, normalizeCode, parseInvite } from './net.js?v=4';
-import { RANKS, SUIT_SYMBOLS } from './cards.js?v=4';
-import { STARTING_CHIPS, MAX_SEATS } from './engine.js?v=4';
-import { PERSONALITIES, STYLE_KEYS, styleInfo, resolveStyle } from './bot.js?v=4';
-import { BOT_NAMES, defaultStyleFor } from './controller.js?v=4';
-import { bestFive, heroHandInfo, quickEquity } from './handinfo.js?v=4';
-import { play, isMuted, setMuted } from './sound.js?v=4';
+import { HostController } from './controller.js?v=5';
+import { hostRoom, joinRoom, errText, normalizeCode, parseInvite } from './net.js?v=5';
+import { RANKS, SUIT_SYMBOLS } from './cards.js?v=5';
+import { STARTING_CHIPS, MAX_SEATS } from './engine.js?v=5';
+import { PERSONALITIES, STYLE_KEYS, styleInfo, resolveStyle } from './bot.js?v=5';
+import { BOT_NAMES, defaultStyleFor } from './controller.js?v=5';
+import { bestFive, heroHandInfo, quickEquity } from './handinfo.js?v=5';
+import { play, isMuted, setMuted } from './sound.js?v=5';
+import { toast as uiToast, dropToast, haptic, confirmSheet, confetti, installPressFeedback } from './ui.js?v=5';
+import { BUYIN_PRESETS } from './controller.js?v=5';
 
 const $ = (s) => document.querySelector(s);
 const fmt = (n) => Number(n || 0).toLocaleString('en-US');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmtShort = (n) => (n >= 1e6 ? (n / 1e6).toFixed(n % 1e6 ? 1 : 0) + 'M' : n >= 1000 ? (n / 1000).toFixed(n % 1000 ? 1 : 0) + 'K' : String(n));
 const cleanName = (s) => String(s || '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 12);
 
 const styleKey = (s) => resolveStyle(s);
 
+// Stable player identity on this device (survives reloads, closing the tab and re-opening the link).
 function getToken() {
-  let t = sessionStorage.getItem('holdem.token');
+  let t = null;
+  try { t = localStorage.getItem('holdem.token2') || sessionStorage.getItem('holdem.token'); } catch (e) { /* private mode */ }
   if (!t) {
     const a = new Uint32Array(4); crypto.getRandomValues(a);
     t = [...a].map((x) => x.toString(36)).join('');
-    sessionStorage.setItem('holdem.token', t);
   }
+  try { localStorage.setItem('holdem.token2', t); } catch (e) { /* */ }
   return t;
 }
+// last room this device was seated in (for automatic rejoin after a reload / closed tab)
+const SESSION_KEY = 'holdem.session';
+const SESSION_TTL = 12 * 3600 * 1000;
+function loadSession() {
+  try { const x = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); return x && Date.now() - x.at < SESSION_TTL ? x : null; } catch (e) { return null; }
+}
+function saveSession() { try { localStorage.setItem(SESSION_KEY, JSON.stringify({ code: S.code, key: S.key, name: S.name, at: Date.now() })); } catch (e) { /* */ } }
+function clearSession() { try { localStorage.removeItem(SESSION_KEY); } catch (e) { /* */ } }
 
 const S = {
   mode: null,            // 'solo' | 'host' | 'client'
@@ -54,14 +67,7 @@ const S = {
 };
 
 // ---------------- toast / modal ----------------
-let toastTimer;
-function toast(msg, ms = 2200) {
-  const t = $('#toast');
-  t.textContent = msg;
-  t.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), ms);
-}
+function toast(msg, opts) { return uiToast(msg, opts); }
 function openModal(html) { $('#modal-body').innerHTML = html; $('#modal').classList.remove('hidden'); }
 function closeModal() { $('#modal').classList.add('hidden'); S.modalKind = null; }
 $('#modal .modal-close').onclick = closeModal;
@@ -78,6 +84,21 @@ if (roomParam) {
   $('#join-code').value = roomParam;
   $('#join-panel').classList.add('highlight');
   $('#join-panel h2').textContent = `加入房间 ${roomParam}`;
+}
+
+// Same room as last time (reload / closed tab / re-opened the link): rejoin automatically.
+const lastSession = loadSession();
+if (roomParam && lastSession && lastSession.code === roomParam) {
+  if (!S.key && lastSession.key) S.key = invite.key = lastSession.key;
+  if (!nick.value && lastSession.name) nick.value = lastSession.name;
+  S.autoRejoin = true;
+} else if (!roomParam && lastSession && lastSession.key) {
+  const box = document.createElement('section');
+  box.className = 'card-panel resume';
+  box.innerHTML = `<h2><span class="ic">🔄</span>回到刚才的房间 ${esc(lastSession.code)}</h2><div class="row"><button class="btn green wide" id="btn-resume">重新加入</button><button class="btn ghost-btn" id="btn-forget" aria-label="忘记">✕</button></div>`;
+  $('#join-panel').before(box);
+  $('#btn-resume').onclick = () => { location.href = `${location.pathname}?room=${lastSession.code}#k=${lastSession.key}`; };
+  $('#btn-forget').onclick = () => { clearSession(); box.remove(); };
 }
 
 function requireName() {
@@ -161,14 +182,47 @@ function onLocalChange() {
   queueMicrotask(() => {
     S.broadcastQueued = false;
     if (!S.ctrl) return;
-    setView(S.ctrl.view(S.mySeat));
+    setView(S.ctrl.view(S.mySeat, { host: true }));
     if (S.mode === 'host') {
-      for (const r of S.remotes.values()) {
-        if (r.conn.open) { try { r.conn.send({ t: 'state', view: S.ctrl.view(r.seat) }); } catch (e) { /* ignore */ } }
-      }
+      S.rev = (S.rev || 0) + 1;
+      for (const r of S.remotes.values()) sendState(r);
+      saveLedger();
     }
     if (S.modalKind === 'settings') refreshSettings();
+    if (S.modalKind === 'ledger') renderLedger();
+    hostRequestsToasts();
   });
+}
+
+function sendState(r) {
+  if (r.conn.open) { try { r.conn.send({ t: 'state', rev: S.rev || 0, view: S.ctrl.view(r.seat) }); } catch (e) { /* ignore */ } }
+}
+// session ledger survives the page: host writes it, everyone can look at it from the lobby later
+function saveLedger() {
+  const v = S.view;
+  if (!v || !v.ledger || !S.code) return;
+  clearTimeout(S.ledgerTimer);
+  S.ledgerTimer = setTimeout(() => { try { localStorage.setItem('holdem.ledger', JSON.stringify({ code: S.code, at: Date.now(), ledger: v.ledger })); } catch (e) { /* */ } }, 800);
+}
+// host: one-tap approve / deny toasts for buy-in requests
+function hostRequestsToasts() {
+  if (S.mode !== 'host' || !S.view) return;
+  const reqs = S.view.requests || [];
+  S.shownReq = S.shownReq || new Set();
+  for (const r of reqs) {
+    if (S.shownReq.has(r.rid)) continue;
+    S.shownReq.add(r.rid);
+    play('turn'); haptic([20, 40, 20]);
+    toast(`<b>${esc(r.name)}</b> 申请买入 <b>${fmt(r.amount)}</b>`, { html: true, type: 'money', key: 'req' + r.rid, ms: 0,
+      actions: [{ label: '拒绝', onClick: () => decideBuy(r.rid, false) }, { label: '批准', kind: 'ok', onClick: () => decideBuy(r.rid, true) }] });
+  }
+  for (const rid of S.shownReq) if (!reqs.some((r) => r.rid === rid)) dropToast('req' + rid);
+}
+function decideBuy(rid, yes) {
+  const res = S.ctrl.decide(rid, yes);
+  if (!res.ok) return;
+  for (const r of S.remotes.values()) if (r.seat === res.seat) { try { r.conn.send({ t: 'buyres', approved: res.approved, amount: res.amount }); } catch (e) { /* */ } }
+  toast(yes ? `已批准买入 ${fmt(res.amount)}` : '已拒绝', { type: yes ? 'ok' : 'info', ms: 1500 });
 }
 
 function startSolo(bots) {
@@ -187,9 +241,11 @@ function startHost() {
   S.mode = 'host';
   makeController();
   S.mySeat = S.ctrl.addHuman('host:' + S.token, S.name, 0);
+  S.ctrl.game.seats[S.mySeat].ready = true;
   S.peer = hostRoom({
     onReady(code, key, net) {
       S.code = code; S.key = key; S.net = net;
+      S.rev = 0;
       $('#btn-host').disabled = false;
       lobbyMsg('');
       history.replaceState(null, '', `?room=${code}#k=${key}`);
@@ -230,9 +286,15 @@ function onRemoteMsg(conn, msg) {
     const name = cleanName(msg.name) || '玩家';
     const id = 'p:' + token;
     let seat = ctrl.seatOf(id);
-    // drop any older connection for the same player
+    // lost their token (new browser / WeChat webview)? take back their own disconnected seat by name
+    if (seat < 0) seat = ctrl.reclaimSeat(name, id);
+    // drop any older connection for the same player (tell it why, so it doesn't fight back)
     for (const [pid, other] of S.remotes) {
-      if (other.seat === seat && seat >= 0 && pid !== conn.peer) { S.remotes.delete(pid); try { other.conn.close(); } catch (e) { /* */ } }
+      if (other.seat === seat && seat >= 0 && pid !== conn.peer) {
+        S.remotes.delete(pid);
+        try { other.conn.send({ t: 'replaced' }); } catch (e) { /* */ }
+        setTimeout(() => { try { other.conn.close(); } catch (e) { /* */ } }, 300);
+      }
     }
     if (seat >= 0) {
       ctrl.setConnected(seat, true);
@@ -249,15 +311,21 @@ function onRemoteMsg(conn, msg) {
     S.remotes.set(conn.peer, r);
     if (isNew) toast(`${name} 已连接（${r.transport === 'relay' ? '加密中继' : '直连'}）`);
     conn.send({ t: 'welcome', seat, code: S.code });
+    sendState(r); // full table state right away (own hole cards included)
     onLocalChange();
     return;
   }
-  if (!r) return;
+  if (!r) { if (msg.t !== 'pong') { try { conn.send({ t: 'rejoin' }); } catch (e) { /* */ } } return; } // unknown connection: ask it to say hello
   if (msg.t === 'act' && msg.action && typeof msg.action === 'object') {
     const res = ctrl.handleAction(r.seat, { type: String(msg.action.type), amount: Number(msg.action.amount) || 0 });
     if (!res.ok) { conn.send({ t: 'error', text: res.error }); onLocalChange(); }
   } else if (msg.t === 'sitout') {
     ctrl.setSittingOut(r.seat, !!msg.v);
+  } else if (msg.t === 'ready') {
+    ctrl.setReady(r.seat, !!msg.v);
+  } else if (msg.t === 'buyin') {
+    const res = ctrl.buyIn(r.seat, Number(msg.amount));
+    conn.send({ t: 'buyack', ...res, amount: Number(msg.amount) || 0 });
   } else if (msg.t === 'leave') {
     S.remotes.delete(conn.peer);
     ctrl.removeSeat(r.seat);
@@ -275,13 +343,19 @@ function onRemoteClose(conn) {
 
 function startHostHeartbeat() {
   clearInterval(S.heartbeat);
+  S.hbLast = Date.now();
   S.heartbeat = setInterval(() => {
     const now = Date.now();
+    // our own page was frozen (phone in background): don't blame the players for the silence
+    if (now - S.hbLast > 6000) for (const r of S.remotes.values()) r.lastSeen = now;
+    S.hbLast = now;
     for (const [pid, r] of S.remotes) {
-      if (now - r.lastSeen > 13000) { try { r.conn.close(); } catch (e) { /* */ } onRemoteClose(r.conn); S.remotes.delete(pid); continue; }
+      if (now - r.lastSeen > 9000) { try { r.conn.close(); } catch (e) { /* */ } onRemoteClose(r.conn); S.remotes.delete(pid); continue; }
       if (r.conn.open) { try { r.conn.send({ t: 'ping' }); } catch (e) { /* */ } }
     }
-  }, 3000);
+    // a seated human with no live connection at all is offline (e.g. host was frozen and missed the close)
+    if (S.ctrl) for (const p of S.ctrl.game.seats) if (p && p.id.startsWith('p:') && p.connected && ![...S.remotes.values()].some((r) => r.seat === p.seat)) S.ctrl.setConnected(p.seat, false);
+  }, 2000);
 }
 
 // ---------------- client ----------------
@@ -290,42 +364,62 @@ function startJoin(code, key) {
   S.code = code;
   S.key = key || '';
   S.netState = 'connecting';
+  S.reconnectTries = 0;
   lobbyMsg(`正在连接房间 ${code}…`);
   $('#btn-join').disabled = true;
   const netParam = new URLSearchParams(location.search).get('net');
   history.replaceState(null, '', `?room=${code}${netParam ? '&net=' + netParam : ''}${S.key ? '#k=' + S.key : ''}`);
-  connectClient(false);
+  connectClient();
 }
 
 // One connection attempt (direct first, encrypted relay fallback — see net.js).
-function connectClient(isRetry) {
+// Every attempt ends in exactly one of: welcome (ok) · failure → retry/backoff. Nothing can leave us stuck.
+function connectClient() {
   try { S.client && S.client.destroy(); } catch (e) { /* */ }
+  clearTimeout(S.welcomeTimer);
   const attempt = S.client = joinRoom(S.code, S.key, {
-    onProgress(t) { if (!S.joined) lobbyMsg(t); else if (S.netState === 'reconnecting') showBanner(`连接中断，正在重连…（第 ${S.reconnectTries} 次）· ${esc(t)}`, 'info'); },
+    onProgress(t) { if (!S.joined) lobbyMsg(t); else if (S.netState !== 'ok') showNetBanner(t); },
     onOpen(conn) {
       if (S.client !== attempt) return;
       S.transport = conn.transport;
+      S.lastRev = -1;
       conn.send({ t: 'join', name: S.name, token: S.token });
       S.lastMsgAt = Date.now();
       if (!S.joined) lobbyMsg(`已连接（${conn.transport === 'relay' ? '加密中继' : '直连'}），正在入座…`);
+      // the host must answer with a welcome; if not, this attempt is dead
+      S.welcomeTimer = setTimeout(() => { if (S.client === attempt && S.netState !== 'ok') attemptFailed(attempt, { type: 'timeout', message: '房主没有回应' }); }, 9000);
     },
     onData(msg) { if (S.client === attempt) onHostMsg(msg); },
-    onClose() { if (S.client === attempt) onClientDisconnected('连接已断开'); },
-    onError(err) {
+    onClose() {
       if (S.client !== attempt) return;
-      console.warn('client error', err);
-      if (isRetry) { scheduleReconnect(err); return; }
-      $('#btn-join').disabled = false;
-      lobbyMsg('加入失败：' + errText(err) + '。可点「加入」重试。');
-      S.mode = null; S.netState = 'failed';
+      if (S.netState === 'ok') onClientDisconnected('连接已断开');
+      else attemptFailed(attempt, { type: 'socket-closed', message: '连接被关闭' });
     },
+    onError(err) { if (S.client === attempt) attemptFailed(attempt, err); },
   });
+}
+
+function attemptFailed(attempt, err) {
+  if (S.client !== attempt) return;
+  console.warn('connect attempt failed', err);
+  clearTimeout(S.welcomeTimer);
+  try { attempt.destroy(); } catch (e) { /* */ }
+  S.client = null;
+  if (!S.joined) {
+    // first join from the lobby: auto-retry a couple of times before asking the user
+    if (S.autoRejoin && S.reconnectTries < 3) { S.reconnectTries++; lobbyMsg(`重新加入中…（第 ${S.reconnectTries + 1} 次）`); S.retryTimer = setTimeout(connectClient, 1500); return; }
+    $('#btn-join').disabled = false;
+    lobbyMsg('加入失败：' + errText(err) + '。可点「加入」重试。');
+    S.mode = null; S.netState = 'failed';
+    return;
+  }
+  scheduleReconnect(err);
 }
 
 function sendToHost(msg) {
   const c = S.client && S.client.conn;
-  if (c && c.open) { try { c.send(msg); return true; } catch (e) { /* */ } }
-  if (msg.t !== 'pong') toast('未连接到房主，正在重连…');
+  if (c && c.open && S.netState === 'ok') { try { c.send(msg); return true; } catch (e) { /* */ } }
+  if (msg.t !== 'pong') toast('未连接到房主，正在重连…', { type: 'warn', key: 'nohost' });
   return false;
 }
 
@@ -333,72 +427,113 @@ function onHostMsg(msg) {
   S.lastMsgAt = Date.now();
   if (!msg || typeof msg !== 'object') return;
   if (msg.t === 'welcome') {
+    clearTimeout(S.welcomeTimer); clearTimeout(S.retryTimer);
     S.mySeat = msg.seat;
     const first = !S.joined;
+    const wasDown = S.netState !== 'ok';
     S.joined = true;
     S.reconnectTries = 0;
     S.netState = 'ok';
-    clearTimeout(S.retryTimer);
+    S.autoRejoin = false;
+    saveSession();
     $('#btn-join').disabled = false;
     lobbyMsg('');
     hideBanner();
-    if (first) { showGame(); startClientWatchdog(); toast(`已加入房间（${S.transport === 'relay' ? '加密中继' : '直连'}），等待房主开始`); }
-    else toast('已重新连上 👍');
+    dropToast('nohost');
+    if (first) { showGame(); startClientWatchdog(); toast(`已加入房间（${S.transport === 'relay' ? '加密中继' : '直连'}）`, { type: 'ok' }); }
+    else if (wasDown) { toast('已重新连上 👍', { type: 'ok', key: 'net' }); haptic(15); }
     renderNetDot();
   } else if (msg.t === 'state') {
+    if (typeof msg.rev === 'number') { if (msg.rev <= S.lastRev) return; S.lastRev = msg.rev; } // stale/out-of-order snapshot
     setView(msg.view);
   } else if (msg.t === 'ping') {
     sendToHost({ t: 'pong' });
+  } else if (msg.t === 'rejoin') {
+    const c = S.client && S.client.conn;
+    if (c && c.open) c.send({ t: 'join', name: S.name, token: S.token });
+  } else if (msg.t === 'replaced') {
+    // this seat was taken over by another window/device of ours: stop here (no reconnect tug-of-war)
+    S.netState = 'failed'; S.replaced = true;
+    try { S.client && S.client.destroy(); } catch (e) { /* */ }
+    S.client = null;
+    renderNetDot();
+    showBanner('你已在其他窗口/设备进入这个座位。 <button class="btn small-btn" id="btn-take-back">在这里继续</button>');
+    $('#btn-take-back').onclick = () => { S.replaced = false; manualRejoin(); };
   } else if (msg.t === 'reject') {
     S.leaving = true;
+    clearSession();
     alert(msg.reason || '无法加入');
     location.href = location.pathname;
+  } else if (msg.t === 'buyack') {
+    if (!msg.ok) toast(msg.error || '买入失败', { type: 'err' });
+    else toast(msg.status === 'pending' ? `已申请买入 ${fmt(msg.amount)}，等待房主批准…` : msg.status === 'queued' ? `买入 ${fmt(msg.amount)}，本手结束后到账` : `买入成功 +${fmt(msg.amount)}`, { type: msg.status === 'done' ? 'ok' : 'money', key: 'buy' });
+    if (msg.ok && msg.status === 'done') play('chips');
+  } else if (msg.t === 'buyres') {
+    toast(msg.approved ? `房主已批准买入 ${fmt(msg.amount)} 🎉` : '房主拒绝了你的买入申请', { type: msg.approved ? 'ok' : 'warn', key: 'buy' });
+    if (msg.approved) play('chips');
   } else if (msg.t === 'error') {
     S.pending = false; S.actionKey = '';
-    toast(msg.text || '操作无效');
+    toast(msg.text || '操作无效', { type: 'warn' });
   }
 }
 
 function startClientWatchdog() {
   clearInterval(S.heartbeat);
   S.heartbeat = setInterval(() => {
-    if (S.joined && S.netState === 'ok' && Date.now() - S.lastMsgAt > 12000) onClientDisconnected('长时间没有收到房主数据');
-  }, 3000);
+    if (S.joined && S.netState === 'ok' && Date.now() - S.lastMsgAt > 8000) onClientDisconnected('长时间没有收到房主数据');
+    if (S.netState !== 'ok' && S.view) renderNetDot();
+  }, 2000);
 }
 
-// Lost the host: keep retrying (direct + relay) with gentle backoff for ~3 minutes, then offer a button.
+// Lost the host: retry (direct + relay) with gentle backoff — forever, slower after a while.
 function onClientDisconnected(reason) {
-  if (S.leaving || !S.joined || S.netState === 'reconnecting') return;
+  if (S.leaving || !S.joined || S.replaced || S.netState === 'reconnecting') return;
   S.netState = 'reconnecting';
   S.lastReason = reason;
   S.reconnectTries = 0;
+  S.downSince = Date.now();
+  clearTimeout(S.welcomeTimer);
   try { S.client && S.client.destroy(); } catch (e) { /* */ }
   S.client = null;
   renderNetDot();
-  showBanner('连接中断，正在重连…', 'info');
+  render();
+  showNetBanner();
   clearTimeout(S.retryTimer);
-  S.retryTimer = setTimeout(reconnectNow, 800);
+  S.retryTimer = setTimeout(reconnectNow, 600);
 }
 function reconnectNow() {
   clearTimeout(S.retryTimer);
-  if (S.leaving || S.netState === 'ok') return;
-  S.netState = 'reconnecting';
+  if (S.leaving || S.replaced || S.netState === 'ok' || !S.joined) return;
+  if (S.netState !== 'failed') S.netState = 'reconnecting';
   S.reconnectTries++;
   renderNetDot();
-  showBanner(`连接中断，正在重连…（第 ${S.reconnectTries} 次）`, 'info');
-  connectClient(true);
+  showNetBanner();
+  connectClient();
 }
-function scheduleReconnect(err) {
-  if (S.netState === 'ok') return;
-  if (S.reconnectTries >= 12) {
-    S.netState = 'failed';
-    renderNetDot();
-    showBanner(`与房主的连接已断开：${esc(errText(err))} <button class="btn small-btn" id="btn-retry-net">重试</button>`);
-    const b = $('#btn-retry-net'); if (b) b.onclick = () => { S.reconnectTries = 0; reconnectNow(); };
-    return;
-  }
-  const wait = Math.min(1500 * 2 ** Math.min(S.reconnectTries, 3), 10000);
+function scheduleReconnect() {
+  if (S.netState === 'ok' || S.leaving || S.replaced) return;
+  if (S.reconnectTries >= 10) S.netState = 'failed'; // keep trying, but tell the user and offer the button
+  renderNetDot();
+  showNetBanner();
+  const wait = S.reconnectTries < 4 ? 1500 * S.reconnectTries : Math.min(20000, 5000 + 1500 * S.reconnectTries);
+  clearTimeout(S.retryTimer);
   S.retryTimer = setTimeout(reconnectNow, wait);
+}
+// "重新加入": always works from the same link — a fresh attempt right now
+function manualRejoin() {
+  if (S.mode !== 'client') { location.reload(); return; }
+  S.replaced = false;
+  S.reconnectTries = 0;
+  S.netState = 'reconnecting';
+  toast('正在重新加入…', { type: 'net', key: 'net' });
+  reconnectNow();
+}
+function showNetBanner(detail) {
+  if (S.netState === 'ok' || S.replaced) return;
+  const secs = Math.round((Date.now() - (S.downSince || Date.now())) / 1000);
+  const failed = S.netState === 'failed';
+  showBanner(`<span class="nb-ic ${failed ? 'bad' : ''}">${failed ? '⚠️' : '📶'}</span>${failed ? '暂时连不上房主（房主可能锁屏/切到后台），仍在自动重试' : '连接中断，正在重连'}<span class="nb-sub">${secs}s · 第 ${S.reconnectTries} 次${detail ? ' · ' + esc(detail) : ''}</span><button class="btn small-btn" id="btn-rejoin">重新加入</button>`, failed ? 'warn' : 'info');
+  const b = $('#btn-rejoin'); if (b) b.onclick = manualRejoin;
 }
 
 function showBanner(html, kind = '') { const b = $('#banner'); b.innerHTML = html; b.className = 'banner ' + kind; }
@@ -575,6 +710,7 @@ function winningCards(v) {
 function setView(v) {
   const prev = S.view;
   S.view = v;
+  S.viewAt = Date.now();
   S.deadline = v.turnRemainingMs ? Date.now() + v.turnRemainingMs : 0;
   S.pending = false;
   if (v.handNo !== animHand) { animT.clear(); animHand = v.handNo; }
@@ -582,8 +718,13 @@ function setView(v) {
   spawnFx(prev, v);
   playSounds(prev, v);
   const turnKey = `${v.handNo}-${v.phase}-${v.toAct}-${v.currentBet}`;
+  if (prev && prev.phase !== 'handover' && v.phase === 'handover' && v.result && v.result.winners.some((w) => w.seat === S.mySeat)) {
+    const big = v.result.winners.find((w) => w.seat === S.mySeat).amount >= 10 * v.bb;
+    setTimeout(() => { const [x, y] = posOf(S.mySeat); const r = $('#table').getBoundingClientRect(); confetti(((r.left + r.width * x / 100) / innerWidth) * 100, ((r.top + r.height * y / 100) / innerHeight) * 100, big ? 64 : 34); haptic([30, 50, 30]); }, 900);
+  }
   if (v.toAct === S.mySeat && S.mySeat >= 0 && turnKey !== S.lastTurnKey) {
     S.raiseOpen = false;
+    S.allinArm = 0;
     play('turn');
     if (navigator.vibrate) { try { navigator.vibrate([40, 60, 40]); } catch (e) { /* */ } }
     if (document.hidden) document.title = '🔔 轮到你了 · 德州扑克';
@@ -643,7 +784,7 @@ function renderSeats(v, isHost, win) {
     const showdownLoser = win && p.cards && !win.seats.has(i) && p.inHand && !p.folded;
     const tilted = p.isBot && p.tilt >= 0.5;
     const cls = ['seat', side, me && 'me', active && 'active', active && p.isBot && 'thinking', p.inHand && p.folded && 'folded',
-      (out || p.sittingOut || !p.connected) && 'out', isWin && 'winner', showdownLoser && 'loser', tilted && 'tilt', p.cards && !me && p.hasCards && 'shown'].filter(Boolean).join(' ');
+      (out || p.sittingOut || !p.connected) && 'out', !p.connected && 'offline', isWin && 'winner', showdownLoser && 'loser', tilted && 'tilt', p.cards && !me && p.hasCards && 'shown'].filter(Boolean).join(' ');
     let hole = '';
     if (p.hasCards && !me) {
       if (p.cards) {
@@ -662,16 +803,19 @@ function renderSeats(v, isHost, win) {
     }
     // action bubble
     let b = bubbleOf(p.lastAction);
-    if (!p.connected) b = { kind: 'status', text: '📴 离线' };
+    if (!p.connected) b = { kind: 'offline', text: '' };
     else if (p.sittingOut) b = { kind: 'status', text: '暂离' };
     else if (out) b = { kind: 'status', text: '出局' };
     if (p.handName) b = { kind: 'hand', text: p.handName };
     if (active && p.isBot) b = { kind: 'think', text: '思考中<i>.</i><i>.</i><i>.</i>' };
     let bubble = '';
-    if (b) {
+    if (b && b.kind === 'offline') {
+      bubble = `<div class="bubble offline" data-off="${p.offMs || 0}" data-turn="${active ? 1 : 0}">${offlineText(p.offMs || 0, active)}</div>`;
+    } else if (b) {
       const a = anim(`bub-${i}-${b.text}`, 'pop', 350);
       bubble = `<div class="bubble ${b.kind} ${a.cls}" style="${a.style}">${b.kind === 'think' ? b.text : esc(b.text)}</div>`;
     }
+    const readyBadge = !v.running && !p.isBot && p.connected ? (p.ready ? '<span class="rdy ok">✓</span>' : '<span class="rdy">…</span>') : '';
     const av = avatarOf(p);
     const info = p.isBot ? styleInfo(p.style) : null;
     const tag = info
@@ -682,7 +826,8 @@ function renderSeats(v, isHost, win) {
       <div class="avatar-wrap">
         <svg class="ring" viewBox="0 0 56 56"><circle class="bg" cx="28" cy="28" r="26"/><circle class="fg" cx="28" cy="28" r="26" stroke-dasharray="${RING_C.toFixed(2)}" stroke-dashoffset="0"/></svg>
         <div class="avatar" style="--c1:${av.c1};--c2:${av.c2}">${av.t}</div>
-        ${posTag}${hole}
+        ${posTag}${hole}${readyBadge}
+        ${!p.connected ? '<span class="off-ic" aria-label="掉线">📶</span>' : ''}
         ${isWin ? '<div class="crown">👑</div>' : ''}
       </div>
       <div class="plate"><div class="name">${esc(p.name)}</div><div class="chips">${fmt(p.chips)}</div>${tag}</div>
@@ -705,6 +850,12 @@ function renderSeats(v, isHost, win) {
   seatsEl.querySelectorAll('.seat.empty.can-add').forEach((el) => { el.onclick = () => { play('click'); S.ctrl.addBot(); }; });
   seatsEl.querySelectorAll('.seat[data-seat]').forEach((el) => { el.onclick = () => showSeatInfo(Number(el.dataset.seat)); });
   updateTimers();
+}
+
+function offlineText(offMs, myTurn) {
+  if (myTurn && S.deadline) return `掉线中… ${Math.max(0, Math.ceil((S.deadline - Date.now()) / 1000))}s 后自动过牌/弃牌`;
+  const sec = Math.floor(offMs / 1000);
+  return `掉线中… ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
 }
 
 function renderCenter(v, isHost, win) {
@@ -744,14 +895,18 @@ function renderCenter(v, isHost, win) {
   }
   if (!betting) {
     const eligible = v.seats.filter((p) => p && p.chips > 0 && !p.sittingOut && p.connected).length;
-    if (!v.running) {
-      if (isHost) {
-        msg += eligible >= 2
-          ? `<div>${S.mode === 'host' ? '朋友到齐后点击开始' : ''}</div><button class="btn primary big-start" id="btn-start">▶ 开始游戏</button>`
-          : '<div class="hint">至少需要 2 名玩家 · 点空位添加 AI 或邀请朋友</div>';
-      } else msg += '<div class="hint">等待房主开始游戏…</div>';
+    if (!v.running && S.mode !== 'solo') {
+      // waiting room: who's here, who's ready
+      const humans = v.seats.filter((p) => p && !p.isBot);
+      const isReady = (p) => p.ready;
+      const ready = humans.filter((p) => isReady(p) && p.connected).length;
+      const chips = v.seats.filter(Boolean).map((p) => { const av = avatarOf(p); return `<div class="wr-p ${p.connected ? '' : 'off'} ${p.isBot || isReady(p) ? 'ok' : ''}"><div class="avatar sm" style="--c1:${av.c1};--c2:${av.c2}">${av.t}</div><span>${esc(p.name)}</span><em>${p.isBot ? 'AI' : !p.connected ? '掉线' : isReady(p) ? '已准备' : '未准备'}</em></div>`; }).join('');
+      msg += `<div class="waitroom"><div class="wr-title">${isHost ? '等待朋友加入' : '等待房主开始'} · <b>${ready}/${humans.length}</b> 已准备</div><div class="wr-list">${chips}</div>
+        ${isHost ? (eligible >= 2 ? `<button class="btn primary big-start" id="btn-start">▶ 开始游戏</button>` : '<div class="hint">至少需要 2 名玩家 · 点空位添加 AI 或邀请朋友</div>') : ''}</div>`;
+    } else if (!v.running) {
+      msg += isHost && eligible >= 2 ? '<button class="btn primary big-start" id="btn-start">▶ 开始游戏</button>' : '<div class="hint">至少需要 2 名玩家</div>';
     } else if (eligible < 2) {
-      msg += `<div class="hint">等待更多有筹码的玩家…${isHost ? '（可在菜单中补码或添加 AI）' : ''}</div>`;
+      msg += `<div class="hint">等待更多有筹码的玩家…${isHost ? '（可在菜单中买入或添加 AI）' : '（可点「买筹码」）'}</div>`;
     }
   }
   const cm = $('#center-msg');
@@ -828,7 +983,7 @@ function renderActionBar(v, isHost) {
   const bar = $('#action-bar');
   const me = S.mySeat >= 0 ? v.seats[S.mySeat] : null;
   const la = v.legal;
-  const key = `${v.handNo}|${v.phase}|${v.toAct}|${v.currentBet}|${la ? la.minRaiseTo + '-' + la.maxRaiseTo : ''}|${me ? me.chips + '-' + me.bet + '-' + me.sittingOut + '-' + me.inHand + '-' + me.folded + '-' + (me.cards || []).join(',') : ''}|${v.board.length}|${v.running}|${wideMQ.matches}`;
+  const key = `${v.handNo}|${v.phase}|${v.toAct}|${v.currentBet}|${la ? la.minRaiseTo + '-' + la.maxRaiseTo : ''}|${me ? me.chips + '-' + me.bet + '-' + me.sittingOut + '-' + me.inHand + '-' + me.folded + '-' + (me.cards || []).join(',') : ''}|${v.board.length}|${v.running}|${wideMQ.matches}|${JSON.stringify(v.buy)}|${me && me.ready}|${v.rules && v.rules.allowRebuy}|${S.netState}`;
   if (key === S.actionKey && bar.innerHTML) { updateTimers(); return; }
   S.actionKey = key;
   if (!me) { bar.innerHTML = '<div class="waiting">观战中</div>'; return; }
@@ -839,7 +994,9 @@ function renderActionBar(v, isHost) {
   let info = heroStrengthHTML(v, me);
   if (!info) info = me.inHand && me.folded ? '<div class="hs"><div class="hs-label muted">已弃牌</div></div>' : '<div class="hs"><div class="hs-label muted">等待发牌</div></div>';
   const clock = `<div class="turn-clock idle" id="my-clock"><svg viewBox="0 0 44 44"><circle class="bg" cx="22" cy="22" r="19"/><circle class="fg" cx="22" cy="22" r="19" stroke-dasharray="${CLOCK_C.toFixed(2)}" stroke-dashoffset="0"/></svg><span></span></div>`;
-  const stack = `<div class="my-stack"><span class="lbl">筹码</span><b>${fmt(me.chips)}</b>${me.bet ? `<span class="muted">已下 ${fmt(me.bet)}</span>` : ''}</div>`;
+  const canBuy = S.mode !== 'client' || (v.rules && v.rules.allowRebuy);
+  const buyNote = v.buy && v.buy.pending ? `<span class="buy-note">⏳ 待批 ${fmtShort(v.buy.pending)}</span>` : v.buy && v.buy.queued ? `<span class="buy-note">＋${fmtShort(v.buy.queued)} 下手到账</span>` : '';
+  const stack = `<div class="my-stack"><span class="lbl">筹码${canBuy ? '<button class="buy-plus" id="btn-buy-quick" aria-label="买筹码" title="买筹码">＋</button>' : ''}</span><b>${fmt(me.chips)}</b>${me.bet ? `<span class="muted">已下 ${fmt(me.bet)}</span>` : buyNote}</div>`;
   let html = `<div class="my-row"><div class="my-cards">${cards}</div><div class="my-info">${info}</div>${stack}${clock}</div>`;
 
   if (la) {
@@ -851,6 +1008,7 @@ function renderActionBar(v, isHost) {
       <button class="btn act-fold" data-act="fold"><span>弃牌</span><kbd>F</kbd></button>
       ${callBtn}
       ${la.canRaise ? '<button class="btn act-raise" data-act="raise" id="btn-raise"></button>' : ''}
+      <span class="your-turn" aria-hidden="true">轮到你了</span>
     </div>`;
     if (la.canRaise) {
       const pot = v.potTotal;
@@ -869,10 +1027,19 @@ function renderActionBar(v, isHost) {
     }
   } else if (me.sittingOut) {
     html += '<div class="actions"><button class="btn green" id="btn-back">我回来了（回到座位）</button></div>';
-  } else if (!me.inHand && me.chips === 0) {
-    html += isHost
-      ? `<div class="actions"><button class="btn primary" id="btn-rebuy">补码到 ${fmt(STARTING_CHIPS)}</button></div>`
-      : '<div class="actions"><div class="waiting">筹码输光了，请房主在菜单里为你补码</div></div>';
+  } else if (!me.inHand && me.chips === 0 && !(v.buy && v.buy.queued)) {
+    html += v.buy && v.buy.pending
+      ? `<div class="actions"><div class="waiting">⏳ 已申请买入 ${fmt(v.buy.pending)}，等待房主批准…</div></div>`
+      : canBuy
+        ? '<div class="actions"><div class="waiting small">筹码输光了</div><button class="btn primary" id="btn-buy-big">💰 买筹码</button></div>'
+        : '<div class="actions"><div class="waiting">筹码输光了 · 房主已关闭买入</div></div>';
+  } else if (!v.running && S.mode === 'client') {
+    html += `<div class="actions"><div class="waiting small">${me.ready ? '已准备，等待房主开始' : '准备好了就点一下'}</div><button class="btn ${me.ready ? '' : 'green'} ready-btn" id="btn-ready">${me.ready ? '✓ 已准备（取消）' : '✋ 准备'}</button></div>`;
+  } else if (me.inHand && !me.folded && BETTING.includes(v.phase) && !me.allIn) {
+    // in the hand, not my turn: show the controls, clearly disabled
+    const who = v.toAct >= 0 && v.seats[v.toAct] ? v.seats[v.toAct] : null;
+    html += `<div class="actions idle"><button class="btn act-fold" disabled><span>弃牌</span></button><button class="btn act-check" disabled><span>${v.currentBet > me.bet ? '跟注' : '过牌'}</span></button><button class="btn act-raise" disabled><span>加注</span></button>
+      <div class="idle-tip">${who ? `等待 <b>${esc(who.name)}</b>${who.connected === false ? '（掉线中）' : who.isBot ? ' 思考' : ''}<span class="dots"><i>.</i><i>.</i><i>.</i></span>` : (v.runout ? '发牌中…' : '')}</div></div>`;
   } else {
     const who = v.toAct >= 0 && v.seats[v.toAct] ? v.seats[v.toAct] : null;
     const t = who ? `等待 <b>${esc(who.name)}</b> ${who.isBot ? '思考' : '行动'}<span class="dots"><i>.</i><i>.</i><i>.</i></span>` : (v.phase === 'handover' ? '本手结束，下一手即将开始…' : (v.runout ? '发牌中…' : ''));
@@ -883,7 +1050,8 @@ function renderActionBar(v, isHost) {
 
   bar.querySelectorAll('[data-act]').forEach((b) => { b.onclick = () => doAct(b.dataset.act); });
   const back = $('#btn-back'); if (back) back.onclick = () => setSitOut(false);
-  const rb = $('#btn-rebuy'); if (rb) rb.onclick = () => S.ctrl.rebuy(S.mySeat);
+  ['#btn-buy-quick', '#btn-buy-big'].forEach((id) => { const b = $(id); if (b) b.onclick = (e) => { e.stopPropagation(); showBuyIn(); }; });
+  const rd = $('#btn-ready'); if (rd) rd.onclick = () => { haptic(12); play('click'); sendToHost({ t: 'ready', v: !me.ready }); };
   if (la && la.canRaise) setupRaise(v, la);
   updateTimers();
 }
@@ -891,6 +1059,20 @@ function renderActionBar(v, isHost) {
 function doAct(t) {
   const v = S.view, la = v && v.legal;
   if (!la) return;
+  const me = v.seats[S.mySeat];
+  // all-in needs a second tap (3 s window)
+  const panelOpen = wideMQ.matches || ($('#raise-panel') && $('#raise-panel').classList.contains('open'));
+  const goingAllIn = (t === 'raise' && la.canRaise && panelOpen && S.raiseValue >= la.maxRaiseTo) || (t === 'call' && !la.canCheck && me && la.callAmount >= me.chips);
+  if (goingAllIn && Date.now() - (S.allinArm || 0) > 3000) {
+    S.allinArm = Date.now();
+    const btn = t === 'raise' ? $('#btn-raise') : $('[data-act=call]');
+    if (btn) { btn.classList.add('confirm'); btn.querySelector('span').textContent = '再点一次 确认全下'; }
+    haptic([15, 30, 15]); play('tick');
+    clearTimeout(S.allinTimer);
+    S.allinTimer = setTimeout(() => { S.allinArm = 0; S.actionKey = ''; render(); }, 3000);
+    return;
+  }
+  if (goingAllIn) { S.allinArm = 0; clearTimeout(S.allinTimer); }
   if (t === 'raise') {
     if (!la.canRaise) return;
     const panel = $('#raise-panel');
@@ -965,6 +1147,10 @@ function updateTimers() {
     c.setAttribute('stroke-dashoffset', (RING_C * (1 - frac)).toFixed(2));
     c.classList.toggle('urgent', !!S.deadline && frac < 0.3);
   });
+  document.querySelectorAll('.bubble.offline[data-off]').forEach((el) => {
+    const t = offlineText(Number(el.dataset.off) + (Date.now() - (S.viewAt || Date.now())), el.dataset.turn === '1');
+    if (el.textContent !== t) el.textContent = t;
+  });
   const clock = $('#my-clock');
   if (clock) {
     if (v.toAct === S.mySeat && S.deadline) {
@@ -1021,6 +1207,103 @@ function showSeatInfo(seat) {
   });
 }
 
+// ---------------- buy-in / ledger ----------------
+function showBuyIn(seat = S.mySeat) {
+  const v = S.view;
+  const p = v && v.seats[seat];
+  if (!p) return;
+  const isHost = S.mode !== 'client';
+  const forOther = seat !== S.mySeat;
+  const rules = v.rules || { maxBuyIn: 200000, allowRebuy: true, approval: false };
+  if (!isHost && !rules.allowRebuy) { toast('房主已关闭买入', { type: 'warn' }); return; }
+  const room = forOther ? 100000000 : isHost ? S.ctrl.buyRoom(seat) : (v.buy ? v.buy.room : 0);
+  const capped = room < 100000000;
+  const midHand = BETTING.includes(v.phase) && p.inHand && !p.folded;
+  const needApproval = !isHost && rules.approval;
+  const presets = [...BUYIN_PRESETS];
+  if (capped && room > 0 && !presets.includes(room)) presets.push(room);
+  const first = presets.find((a) => a <= room) || 0;
+  openModal(`<h3>💰 买筹码${forOther ? ` · 为 ${esc(p.name)}` : ''}</h3>
+    <div class="buy-head"><div><span class="muted small">当前筹码</span><b>${fmt(p.chips)}</b></div><div class="arrow">→</div><div><span class="muted small">买入后</span><b id="buy-after">${fmt(p.chips + first)}</b></div></div>
+    <div class="buy-presets">${presets.sort((a, b) => a - b).map((a) => `<button class="btn chip-btn ${a === room && !BUYIN_PRESETS.includes(a) ? 'fill' : ''}" data-buy="${a}" ${a > room ? 'disabled' : ''}><i class="chip-d ${a >= 100000 ? 'd100000' : a >= 25000 ? 'd25000' : 'd5000'}"></i><b>${fmtShort(a)}</b>${a === room && !BUYIN_PRESETS.includes(a) ? '<small>补满</small>' : ''}</button>`).join('')}</div>
+    <label class="buy-custom"><span>自定义</span><button class="btn step" data-bstep="-1">−</button><input type="number" id="buy-amt" inputmode="numeric" min="1000" step="1000" value="${first}"><button class="btn step" data-bstep="1">＋</button></label>
+    <ul class="buy-rules muted small">
+      ${capped ? `<li>买入后筹码不超过 <b>${fmt(rules.maxBuyIn)}</b>（还可买 ${fmt(room)}）</li>` : '<li>房主代买，不受上限限制</li>'}
+      ${needApproval ? '<li>⏳ 需要房主批准</li>' : ''}
+      ${midHand ? '<li>你正在牌局中：本手结束后到账</li>' : ''}
+      <li>虚拟娱乐筹码，记入「账本」方便朋友结算</li>
+    </ul>
+    <button class="btn primary wide" id="buy-go" ${room > 0 ? '' : 'disabled'}>${room > 0 ? (needApproval ? '申请买入' : '确认买入') : '已达买入上限'}</button>`);
+  S.modalKind = 'buy';
+  const inp = $('#buy-amt');
+  const sync = () => {
+    const a = Math.max(0, Math.floor(Number(inp.value) || 0));
+    $('#buy-after').textContent = fmt(p.chips + Math.min(a, room));
+    document.querySelectorAll('[data-buy]').forEach((b) => b.classList.toggle('sel', Number(b.dataset.buy) === a));
+    $('#buy-go').disabled = !(a > 0 && a <= room);
+  };
+  document.querySelectorAll('[data-buy]').forEach((b) => { b.onclick = () => { play('chip'); haptic(8); inp.value = b.dataset.buy; sync(); }; });
+  document.querySelectorAll('[data-bstep]').forEach((b) => { b.onclick = () => { play('tick'); inp.value = Math.min(room, Math.max(1000, (Number(inp.value) || 0) + Number(b.dataset.bstep) * 10000)); sync(); }; });
+  inp.oninput = sync;
+  sync();
+  $('#buy-go').onclick = () => {
+    const amount = Math.floor(Number(inp.value) || 0);
+    if (!(amount > 0 && amount <= room)) return;
+    closeModal();
+    if (S.mode === 'client') { sendToHost({ t: 'buyin', amount }); return; }
+    const res = S.ctrl.buyIn(seat, amount, forOther ? { ignoreRules: true } : { skipApproval: true });
+    if (!res.ok) toast(res.error, { type: 'err' });
+    else { play('chips'); toast(res.status === 'queued' ? `买入 ${fmt(amount)}，本手结束后到账` : `${forOther ? p.name + ' ' : ''}买入成功 +${fmt(amount)}`, { type: 'ok' }); }
+  };
+}
+
+// greedy settle-up: who pays whom (net losers → net winners)
+function settleUp(rows) {
+  const pos = rows.filter((r) => r.net > 0).map((r) => ({ ...r, left: r.net })).sort((a, b) => b.left - a.left);
+  const neg = rows.filter((r) => r.net < 0).map((r) => ({ ...r, left: -r.net })).sort((a, b) => b.left - a.left);
+  const out = [];
+  let i = 0, j = 0;
+  while (i < neg.length && j < pos.length) {
+    const x = Math.min(neg[i].left, pos[j].left);
+    if (x > 0) out.push({ from: neg[i].name, to: pos[j].name, amount: x });
+    neg[i].left -= x; pos[j].left -= x;
+    if (!neg[i].left) i++;
+    if (!pos[j].left) j++;
+  }
+  return out;
+}
+function ledgerHTML(rows, { live = true, code = S.code } = {}) {
+  if (!rows || !rows.length) return '<p class="muted">还没有记录</p>';
+  const humans = rows.filter((r) => !r.isBot);
+  const st = settleUp(humans);
+  const sign = (n) => (n > 0 ? `+${fmt(n)}` : n < 0 ? `−${fmt(-n)}` : '0');
+  return `<table class="ledger"><thead><tr><th>玩家</th><th>买入</th><th>${live ? '当前筹码' : '筹码'}</th><th>净输赢</th></tr></thead><tbody>
+    ${rows.map((r) => { const av = avatarOf({ name: r.name, isBot: r.isBot }); return `<tr class="${r.net > 0 ? 'up' : r.net < 0 ? 'down' : ''} ${r.seated ? '' : 'left'}">
+      <td><span class="lg-n"><span class="avatar xs" style="--c1:${av.c1};--c2:${av.c2}">${av.t}</span><span class="lg-nm">${esc(r.name)}</span>${r.seated ? (r.connected ? '' : '<em class="tag-off">掉线</em>') : '<em class="tag-off">已离开</em>'}${r.buys > 1 ? `<small>×${r.buys}</small>` : ''}</span></td>
+      <td>${fmt(r.bought)}</td><td>${fmt(r.stack + r.cashout)}${r.queued ? `<small> +${fmtShort(r.queued)}</small>` : ''}</td><td class="net">${sign(r.net)}</td></tr>`; }).join('')}
+    </tbody></table>
+    ${st.length ? `<h4>结算建议（仅真人）</h4><ul class="settle">${st.map((x) => `<li><b>${esc(x.from)}</b> → <b>${esc(x.to)}</b><span>${fmt(x.amount)}</span></li>`).join('')}</ul>` : ''}
+    <p class="muted small">净输赢 = 当前筹码（含本手已下注）+ 离桌带走 − 总买入。${humans.length < rows.length ? 'AI 的输赢不计入结算建议。' : ''}${code ? ` 房间 ${esc(code)}` : ''}</p>`;
+}
+function renderLedger(open) {
+  const v = S.view;
+  if (!v) return;
+  if (!open && (S.modalKind !== 'ledger' || $('#modal').classList.contains('hidden'))) return;
+  const audit = S.mode !== 'client' && S.ctrl ? S.ctrl.chipAudit() : null;
+  const body = `<h3>📒 账本</h3>${ledgerHTML(v.ledger)}
+    ${audit ? `<p class="muted small audit ${audit.ok ? '' : 'bad'}">筹码核对：总买入 ${fmt(audit.bought)} = 桌上 ${fmt(audit.onTable)} + 带走 ${fmt(audit.cashout)} ${audit.ok ? '✓' : '✗'}</p>` : ''}
+    <div class="row"><button class="btn" id="lg-copy">复制账本</button>${(S.mode !== 'client' || (v.rules && v.rules.allowRebuy)) && S.mySeat >= 0 ? '<button class="btn primary" id="lg-buy">💰 买筹码</button>' : ''}</div>`;
+  if (open) { openModal(body); S.modalKind = 'ledger'; } else $('#modal-body').innerHTML = body;
+  const c = $('#lg-copy'); if (c) c.onclick = () => copyText(ledgerText(v.ledger));
+  const b = $('#lg-buy'); if (b) b.onclick = () => showBuyIn();
+}
+function ledgerText(rows) {
+  const sign = (n) => (n > 0 ? '+' : '') + fmt(n);
+  const lines = rows.map((r) => `${r.name}${r.isBot ? '(AI)' : ''}：买入 ${fmt(r.bought)}，筹码 ${fmt(r.stack + r.cashout)}，净 ${sign(r.net)}`);
+  const st = settleUp(rows.filter((r) => !r.isBot)).map((x) => `${x.from} → ${x.to} ${fmt(x.amount)}`);
+  return `德州扑克朋友局 账本${S.code ? ' · 房间 ' + S.code : ''}\n${lines.join('\n')}${st.length ? '\n结算：' + st.join('；') : ''}\n（虚拟娱乐筹码）`;
+}
+
 // ---------------- menus ----------------
 $('#btn-invite').onclick = showInvite;
 $('#btn-menu').onclick = () => { S.modalKind = 'settings'; renderSettings(true); };
@@ -1075,7 +1358,12 @@ function renderSettings(open) {
       </div>
       <div id="st-plist">${playerListHTML()}</div>
       <div class="row" style="margin-top:8px"><button class="btn blue wide" id="st-addbot" ${players.length >= 8 ? 'disabled' : ''}>＋ 添加 AI 机器人</button></div>
-      <p class="muted small">补码：把玩家筹码补回 ${fmt(STARTING_CHIPS)}（输光或不足时，且不在本手牌局中）。</p>
+      <h4>买入规则</h4>
+      <div class="rules-box">
+        <label class="rl"><span>买入上限<small>买入后筹码不超过</small></span><select id="st-max">${[50000, 100000, 200000, 300000, 500000, 1000000, 100000000].map((x) => `<option value="${x}" ${x === S.ctrl.rules.maxBuyIn ? 'selected' : ''}>${x >= 100000000 ? '不限' : fmt(x)}</option>`).join('')}</select></label>
+        <label class="rl sw"><span>允许买入 / 重买<small>关闭后只有房主能给人加码</small></span><input type="checkbox" id="st-rebuy" ${S.ctrl.rules.allowRebuy ? 'checked' : ''}><i></i></label>
+        <label class="rl sw"><span>需要房主批准<small>朋友申请后你一键批准</small></span><input type="checkbox" id="st-appr" ${S.ctrl.rules.approval ? 'checked' : ''}><i></i></label>
+      </div>
       <h4>盲注</h4>
       <div class="row"><label class="inline">小盲<input type="number" id="st-sb" value="${g.sb}" inputmode="numeric"></label>
         <label class="inline">大盲<input type="number" id="st-bb" value="${g.bb}" inputmode="numeric"></label>
@@ -1084,9 +1372,12 @@ function renderSettings(open) {
       <div class="row"><select id="st-time">${[15, 20, 30, 45, 60, 90].map((s) => `<option value="${s}" ${s === S.ctrl.turnTime ? 'selected' : ''}>${s} 秒</option>`).join('')}</select>
       <span class="muted small">超时自动过牌/弃牌</span></div>`;
   }
-  html += '<h4>我</h4><div class="row">';
+  html += '<h4>我</h4><div class="row wrap">';
+  if (me && (isHost || (v.rules && v.rules.allowRebuy))) html += '<button class="btn primary" id="st-buy">💰 买筹码</button>';
+  html += '<button class="btn" id="st-ledger">📒 账本</button>';
   if (me) html += me.sittingOut ? '<button class="btn green" id="st-back">回到座位</button>' : '<button class="btn" id="st-away">暂离</button>';
-  html += '<button class="btn" id="st-rules">牌型大小</button><button class="btn danger" id="st-leave">退出</button></div>';
+  if (S.mode === 'client') html += '<button class="btn" id="st-rejoin">🔄 重新连接</button>';
+  html += '<button class="btn" id="st-log">📜 牌局记录</button><button class="btn" id="st-rules">牌型大小</button><button class="btn danger" id="st-leave">退出</button></div>';
   if (S.mode === 'host') html += '<p class="muted small">你是房主：关闭页面会结束整个牌局。</p>';
   openModal(html);
   S.modalKind = 'settings';
@@ -1100,14 +1391,22 @@ function renderSettings(open) {
       S.ctrl.setBlinds(sb, bb); toast('已保存');
     });
     $('#st-time').onchange = (e) => S.ctrl.setTurnTime(Number(e.target.value));
+    $('#st-max').onchange = (e) => { S.ctrl.setRules({ maxBuyIn: Number(e.target.value) }); toast('已更新买入上限', { type: 'ok', ms: 1200 }); };
+    $('#st-rebuy').onchange = (e) => { S.ctrl.setRules({ allowRebuy: e.target.checked }); haptic(8); };
+    $('#st-appr').onchange = (e) => { S.ctrl.setRules({ approval: e.target.checked }); haptic(8); };
     bindPlayerList();
   }
+  on('st-buy', () => showBuyIn());
+  on('st-ledger', () => renderLedger(true));
+  on('st-rejoin', () => { closeModal(); manualRejoin(); });
+  on('st-log', () => { closeModal(); $('#log').classList.add('open'); });
   on('st-away', () => { setSitOut(true); closeModal(); });
   on('st-back', () => { setSitOut(false); closeModal(); });
   on('st-rules', showRules);
   on('st-leave', () => {
     if (!confirm(S.mode === 'host' ? '退出将结束整个牌局，确定？' : '确定退出？')) return;
     S.leaving = true;
+    clearSession();
     if (S.mode === 'client') sendToHost({ t: 'leave' });
     setTimeout(() => { S.mode = null; location.href = location.pathname; }, 300);
   });
@@ -1119,7 +1418,7 @@ function playerListHTML() {
       <ul class="plist">${players.map((p) => `<li>
           <span class="nm">${p.isBot ? '🤖' : (p.connected ? '🟢' : '📴')} ${esc(p.name)} · ${fmt(p.chips)}${p.sittingOut ? ' · 暂离' : ''}</span>
           ${p.isBot ? `<select class="style-sel" data-bstyle="${p.seat}">${STYLE_KEYS.map((k) => `<option value="${k}" ${k === resolveStyle(p.botStyle) ? 'selected' : ''}>${PERSONALITIES[k].emoji} ${PERSONALITIES[k].label}</option>`).join('')}</select>` : ''}
-          ${p.chips < STARTING_CHIPS ? `<button class="btn" data-rebuy="${p.seat}">补码</button>` : ''}
+          <button class="btn" data-rebuy="${p.seat}">买入</button>
           ${p.seat !== S.mySeat ? `<button class="btn danger" data-kick="${p.seat}">移除</button>` : ''}
         </li>`).join('')}</ul>`;
 }
@@ -1138,7 +1437,7 @@ function refreshSettings() {
 
 function bindPlayerList() {
     document.querySelectorAll('[data-bstyle]').forEach((sel) => { sel.onchange = () => { S.ctrl.setBotStyle(Number(sel.dataset.bstyle), sel.value); toast('已切换性格'); }; });
-    document.querySelectorAll('[data-rebuy]').forEach((b) => { b.onclick = () => { if (!S.ctrl.rebuy(Number(b.dataset.rebuy))) toast('该玩家正在本手牌局中，等本手结束再补码'); }; });
+    document.querySelectorAll('[data-rebuy]').forEach((b) => { b.onclick = () => showBuyIn(Number(b.dataset.rebuy)); });
     document.querySelectorAll('[data-kick]').forEach((b) => {
       b.onclick = () => {
         const seat = Number(b.dataset.kick);
@@ -1167,9 +1466,12 @@ document.addEventListener('visibilitychange', () => {
   if (S.mode) requestWakeLock();
   // back from background / screen lock: revive connections right away instead of waiting for timeouts
   if (S.mode === 'host' && S.peer && S.peer.kick) S.peer.kick();
-  if (S.mode === 'client' && S.joined) {
-    if (S.netState === 'ok' && Date.now() - S.lastMsgAt > 5000) onClientDisconnected('切回页面时连接已失效');
-    else if (S.netState !== 'ok') { S.reconnectTries = Math.min(S.reconnectTries, 6); reconnectNow(); }
+  if (S.mode === 'client' && S.joined && !S.replaced) {
+    const c = S.client && S.client.conn;
+    if (S.netState === 'ok') {
+      if (Date.now() - S.lastMsgAt > 4000) onClientDisconnected('切回页面时连接已失效');
+      else if (c && c._mq) c._mq.probe(); // socket may have died while we were asleep
+    } else { S.reconnectTries = Math.min(S.reconnectTries, 3); reconnectNow(); }
   }
 });
 window.addEventListener('online', () => { if (S.mode === 'client' && S.joined && S.netState !== 'ok') reconnectNow(); if (S.mode === 'host' && S.peer && S.peer.kick) S.peer.kick(); });
@@ -1179,6 +1481,24 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 }
 
 renderLineup();
+installPressFeedback();
+$('#btn-ledger').onclick = () => { play('click'); renderLedger(true); };
+// previous session's ledger (from the lobby)
+(() => {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('holdem.ledger') || 'null'); } catch (e) { /* */ }
+  if (!saved || !saved.ledger || !saved.ledger.length || Date.now() - saved.at > 7 * 86400000) return;
+  const a = document.createElement('a');
+  a.href = '#'; a.textContent = `📒 上次账本（房间 ${saved.code}）`;
+  a.onclick = (e) => { e.preventDefault(); openModal(`<h3>📒 上次账本</h3><p class="muted small">${new Date(saved.at).toLocaleString('zh-CN')}</p>${ledgerHTML(saved.ledger, { live: false, code: saved.code })}`); };
+  const foot = document.querySelector('.foot'); if (foot) { foot.append(' · '); foot.append(a); }
+})();
+// reload / re-opened link of the room we were sitting in: rejoin without any taps
+if (S.autoRejoin && cleanName(nick.value)) {
+  S.name = cleanName(nick.value);
+  lobbyMsg(`正在重新加入房间 ${roomParam}…`);
+  startJoin(roomParam, S.key);
+}
 
 // expose for debugging / automated smoke tests
 window.__holdem = S;

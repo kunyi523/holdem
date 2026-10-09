@@ -56,17 +56,30 @@ export async function makeCipher(keyB64) {
   };
 }
 
-// Drops replayed/duplicated messages: per sender session, sequence numbers must increase.
+// Drops replayed/duplicated messages. Sliding window per sender session: a number is accepted once,
+// and only if it is not far behind the newest seen (so a late-but-genuine packet is not thrown away;
+// v4 used a strict "must increase" rule, which silently dropped state updates that overtook each other).
+const WINDOW = 1024;
 export class ReplayGuard {
   constructor() { this.m = new Map(); }
   ok(sid, n) {
-    if (typeof sid !== 'string' || !Number.isInteger(n)) return false;
-    const last = this.m.get(sid) || 0;
-    if (n <= last) return false;
-    this.m.set(sid, n);
-    if (this.m.size > 500) this.m.delete(this.m.keys().next().value);
+    if (typeof sid !== 'string' || !Number.isInteger(n) || n < 1) return false;
+    let e = this.m.get(sid);
+    if (!e) { e = { max: 0, seen: new Set() }; this.m.set(sid, e); if (this.m.size > 500) this.m.delete(this.m.keys().next().value); }
+    if (n <= e.max - WINDOW || e.seen.has(n)) return false;
+    e.seen.add(n);
+    if (n > e.max) {
+      e.max = n;
+      if (e.seen.size > WINDOW * 1.5) for (const k of e.seen) if (k <= e.max - WINDOW) e.seen.delete(k);
+    }
     return true;
   }
+}
+
+// Runs async jobs strictly one after another (keeps publish order == sequence order).
+export function serial() {
+  let tail = Promise.resolve();
+  return (job) => { const r = tail.then(job, job); tail = r.catch(() => {}); return r; };
 }
 
 // ---------------- minimal MQTT 3.1.1 client (QoS 0) ----------------
@@ -182,6 +195,13 @@ export class MiniMqtt {
     });
   }
   publish(topic, payload) { return this._send(mqttPublish(topic, payload)); }
+  // Liveness check after the page was in the background: ping, and drop the socket if nothing comes back.
+  probe(ms = 3500) {
+    if (!this.connected) return;
+    const sent = Date.now();
+    this._send(Uint8Array.of(0xc0, 0));
+    setTimeout(() => { if (this.connected && this.lastRx < sent) this.close(); }, ms);
+  }
   _down() {
     if (this.closed) return;
     this.closed = true; this.connected = false;
@@ -210,17 +230,21 @@ export async function relayHost(keyB64, opts, { brokers = BROKERS, timeoutMs = 9
   const inTopic = cipher.base + '/h';
   const sid = randId(12);
   let seq = 0;
+  const queue = serial();
   const guard = new ReplayGuard();
   const conns = new Map(); // clientId -> Conn
+  const recvQ = serial();
   const links = brokers.map((url) => ({ url, mq: null, up: false, backoff: 1500, timer: null }));
   let destroyed = false;
   const state = () => opts.onState && opts.onState({ up: links.filter((l) => l.up).length, total: links.length });
 
-  async function sendTo(conn, m, via) {
-    const link = via && via.up ? via : conn.link && conn.link.up ? conn.link : links.find((l) => l.up);
-    if (!link) return false;
-    const topic = cipher.base + '/c/' + conn.peer;
-    return link.mq.publish(topic, await cipher.seal({ s: sid, n: ++seq, m }, topic));
+  function sendTo(conn, m, via) {
+    return queue(async () => {
+      const link = via && via.up ? via : conn.link && conn.link.up ? conn.link : links.find((l) => l.up);
+      if (!link) return false;
+      const topic = cipher.base + '/c/' + conn.peer;
+      return link.mq.publish(topic, await cipher.seal({ s: sid, n: ++seq, m }, topic));
+    });
   }
 
   async function onIn(link, topic, payload) {
@@ -255,7 +279,7 @@ export async function relayHost(keyB64, opts, { brokers = BROKERS, timeoutMs = 9
     if (destroyed) return Promise.resolve(false);
     const mq = new MiniMqtt(link.url, { WebSocket });
     link.mq = mq;
-    mq.onmessage = (t, p) => onIn(link, t, p);
+    mq.onmessage = (t, p) => recvQ(() => onIn(link, t, p)); // decrypt + handle strictly in arrival order
     return mq.connect().then(() => mq.subscribe(inTopic)).then(() => {
       link.up = true; link.backoff = 1500; state();
       mq.onclose = () => { link.up = false; state(); schedule(link); };
@@ -277,7 +301,13 @@ export async function relayHost(keyB64, opts, { brokers = BROKERS, timeoutMs = 9
     base: cipher.base,
     get up() { return links.filter((l) => l.up).length; },
     total: links.length,
-    kick() { for (const l of links) if (!l.up && !destroyed) { clearTimeout(l.timer); l.timer = null; l.backoff = 1500; dial(l); } },
+    kick() {
+      for (const l of links) {
+        if (destroyed) return;
+        if (l.up) l.mq.probe();
+        else { clearTimeout(l.timer); l.timer = null; l.backoff = 1500; dial(l); }
+      }
+    },
     destroy() {
       destroyed = true;
       for (const c of conns.values()) c.close();
@@ -311,14 +341,16 @@ export function relayJoin(keyB64, handlers, { brokers = BROKERS, timeoutMs = 110
   (async () => {
     try { cipher = await makeCipher(keyB64); } catch (e) { finishErr('relay-badkey'); return; }
     const myTopic = cipher.base + '/c/' + cid;
+    const recvQ = serial();
     const hostTopic = cipher.base + '/h';
-    const post = async (mq, m) => mq.publish(hostTopic, await cipher.seal({ c: cid, s: sid, n: ++seq, m }, hostTopic));
+    const queue = serial();
+    const post = (mq, m) => queue(async () => mq.publish(hostTopic, await cipher.seal({ c: cid, s: sid, n: ++seq, m }, hostTopic)));
     let failed = 0;
     for (const url of brokers) {
       const mq = new MiniMqtt(url, { WebSocket });
       const t = { mq };
       tries.push(t);
-      mq.onmessage = async (topic, payload) => {
+      mq.onmessage = (topic, payload) => recvQ(async () => {
         if (topic !== myTopic) return;
         const env = await cipher.open(payload, myTopic);
         if (!env || !env.m || !guard.ok(env.s, env.n)) return;
@@ -336,7 +368,7 @@ export function relayJoin(keyB64, handlers, { brokers = BROKERS, timeoutMs = 110
         if (mq !== chosen) return;
         if (env.m.bye) { conn.open = false; mq.close(); conn.emit('close'); return; }
         if ('d' in env.m) conn.emit('data', env.m.d);
-      };
+      });
       mq.connect().then(() => mq.subscribe(myTopic)).then(() => {
         anyBroker = true;
         if (done || cancelled) { mq.close(); return; }

@@ -1,8 +1,8 @@
 // Network-first service worker: always revalidates (ETag) so a redeploy shows up immediately; cache = offline fallback.
-const CACHE = 'holdem-v4';
-const V = '?v=4';
+const CACHE = 'holdem-v5';
+const V = '?v=5';
 const ASSETS = ['./', './index.html', './css/style.css' + V, './js/app.js' + V, './js/engine.js' + V, './js/cards.js' + V, './js/evaluator.js' + V,
-  './js/pots.js' + V, './js/bot.js' + V, './js/preflop.js' + V, './js/controller.js' + V, './js/net.js' + V, './js/relay.js' + V, './js/handinfo.js' + V, './js/sound.js' + V,
+  './js/pots.js' + V, './js/bot.js' + V, './js/preflop.js' + V, './js/controller.js' + V, './js/net.js' + V, './js/relay.js' + V, './js/ui.js' + V, './js/handinfo.js' + V, './js/sound.js' + V,
   './vendor/peerjs.min.js', './manifest.webmanifest'];
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).catch(() => {}).then(() => self.skipWaiting()));

@@ -1,8 +1,8 @@
 // Authoritative No-Limit Texas Hold'em engine (runs on the host / in single-player).
-import { newDeck, shuffle, cryptoRandInt } from './cards.js?v=4';
-import { evaluate, describeScore } from './evaluator.js?v=4';
-import { computePots, splitPot } from './pots.js?v=4';
-import { updateTilt } from './bot.js?v=4';
+import { newDeck, shuffle, cryptoRandInt } from './cards.js?v=5';
+import { evaluate, describeScore } from './evaluator.js?v=5';
+import { computePots, splitPot } from './pots.js?v=5';
+import { updateTilt } from './bot.js?v=5';
 
 export const STARTING_CHIPS = 100000;
 export const MAX_SEATS = 8;
@@ -46,7 +46,10 @@ export class Game {
       botStyle: info.botStyle || null,
       chips: info.chips ?? STARTING_CHIPS,
       connected: true,
+      offSince: 0,          // ms timestamp when the connection dropped (0 = online)
       sittingOut: false,
+      autoSitOut: false,    // sat out by the table (timeouts), cleared automatically when they come back
+      ready: !!info.isBot,
       pendingRemove: false,
       hole: [], bet: 0, totalBet: 0,
       folded: true, allIn: false, acted: false, inHand: false,
@@ -68,8 +71,22 @@ export class Game {
     } else if (this.isBetting() && p.inHand) {
       p.pendingRemove = true; // folded but chips still in the pot: remove at hand end
     } else {
+      if (this.onRemove) this.onRemove(p);
       this.seats[seat] = null;
     }
+  }
+
+  // Can chips be added to this seat right now? (not while the player still has live cards)
+  canAddChips(seat) {
+    const p = this.seats[seat];
+    return !!p && !(this.isBetting() && p.inHand && !p.folded);
+  }
+  addChips(seat, amount) {
+    const p = this.seats[seat];
+    amount = Math.floor(amount);
+    if (!p || !(amount > 0) || !this.canAddChips(seat)) return false;
+    p.chips += amount;
+    return true;
   }
 
   isBetting() { return BETTING_PHASES.includes(this.phase); }
@@ -389,7 +406,7 @@ export class Game {
     }
     for (let i = 0; i < MAX_SEATS; i++) {
       const p = this.seats[i];
-      if (p && p.pendingRemove) this.seats[i] = null;
+      if (p && p.pendingRemove) { if (this.onRemove) this.onRemove(p); this.seats[i] = null; }
     }
   }
 
@@ -430,6 +447,7 @@ export class Game {
           seat: p.seat, name: p.name, chips: p.chips, bet: p.bet, totalBet: p.totalBet,
           folded: p.folded, allIn: p.allIn, inHand: p.inHand, isBot: p.isBot,
           connected: p.connected, sittingOut: p.sittingOut, lastAction: p.lastAction,
+          offMs: p.connected === false && p.offSince ? Date.now() - p.offSince : 0, ready: !!p.ready,
           style: p.isBot ? p.botStyle : null, tilt: p.isBot ? Math.round((p.tilt || 0) * 100) / 100 : 0,
           lastNet: p.lastNet || 0,
           stats: p.stats ? { h: p.stats.hands, v: p.stats.vpip, p: p.stats.pfr, a: p.stats.postAggr, n: p.stats.postActs } : null,

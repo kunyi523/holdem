@@ -7,8 +7,8 @@
 //   tricky  诡诈型  trapper: slow-plays monsters, check-raises, mixed sizings, river bluff-raises
 //   regular 稳健型  solid baseline (the v2 "balanced" bot)
 // Plus per-decision noise, varied bet sizes and mild tilt after losing a big pot (game sets p.tilt).
-import { evaluate } from './evaluator.js?v=4';
-import { PREFLOP_ORDER } from './preflop.js?v=4';
+import { evaluate } from './evaluator.js?v=5';
+import { PREFLOP_ORDER } from './preflop.js?v=5';
 
 export const PERSONALITIES = {
   maniac: {
