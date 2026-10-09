@@ -1,6 +1,6 @@
 // Network-first service worker: always revalidates (ETag) so a redeploy shows up immediately; cache = offline fallback.
-const CACHE = 'holdem-v5';
-const V = '?v=5';
+const CACHE = 'holdem-v6';
+const V = '?v=6';
 const ASSETS = ['./', './index.html', './css/style.css' + V, './js/app.js' + V, './js/engine.js' + V, './js/cards.js' + V, './js/evaluator.js' + V,
   './js/pots.js' + V, './js/bot.js' + V, './js/preflop.js' + V, './js/controller.js' + V, './js/net.js' + V, './js/relay.js' + V, './js/ui.js' + V, './js/handinfo.js' + V, './js/sound.js' + V,
   './vendor/peerjs.min.js', './manifest.webmanifest'];

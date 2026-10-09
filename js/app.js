@@ -1,14 +1,14 @@
 // UI + session management (single-player / host / client).
-import { HostController } from './controller.js?v=5';
-import { hostRoom, joinRoom, errText, normalizeCode, parseInvite } from './net.js?v=5';
-import { RANKS, SUIT_SYMBOLS } from './cards.js?v=5';
-import { STARTING_CHIPS, MAX_SEATS } from './engine.js?v=5';
-import { PERSONALITIES, STYLE_KEYS, styleInfo, resolveStyle } from './bot.js?v=5';
-import { BOT_NAMES, defaultStyleFor } from './controller.js?v=5';
-import { bestFive, heroHandInfo, quickEquity } from './handinfo.js?v=5';
-import { play, isMuted, setMuted } from './sound.js?v=5';
-import { toast as uiToast, dropToast, haptic, confirmSheet, confetti, installPressFeedback } from './ui.js?v=5';
-import { BUYIN_PRESETS } from './controller.js?v=5';
+import { HostController } from './controller.js?v=6';
+import { hostRoom, joinRoom, errText, normalizeCode, parseInvite } from './net.js?v=6';
+import { RANKS, SUIT_SYMBOLS } from './cards.js?v=6';
+import { STARTING_CHIPS, MAX_SEATS } from './engine.js?v=6';
+import { PERSONALITIES, STYLE_KEYS, styleInfo, resolveStyle } from './bot.js?v=6';
+import { BOT_NAMES, defaultStyleFor } from './controller.js?v=6';
+import { bestFive, heroHandInfo, quickEquity } from './handinfo.js?v=6';
+import { play, isMuted, setMuted } from './sound.js?v=6';
+import { toast as uiToast, dropToast, haptic, confirmSheet, confetti, installPressFeedback } from './ui.js?v=6';
+import { BUYIN_PRESETS } from './controller.js?v=6';
 
 const $ = (s) => document.querySelector(s);
 const fmt = (n) => Number(n || 0).toLocaleString('en-US');
@@ -599,17 +599,68 @@ const POT_PT_L = [50, 30];
 let POT_PT = POT_PT_P;
 let landscape = false;
 const relPos = (seat) => (seat - (S.mySeat >= 0 ? S.mySeat : 0) + MAX_SEATS) % MAX_SEATS;
-const posOf = (seat) => (landscape ? POS_L : POS_P)[relPos(seat)];
 const toward = (a, b, f) => [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
 // portrait: hand-placed bet spots so chips never cover the board
 const BET_P = [[50, 73], [27, 64], [24, 51], [28, 31], [50, 22], [72, 31], [76, 51], [73, 64]];
-const betPt = (seat) => (landscape ? toward(posOf(seat), CENTER_PT, 0.38) : BET_P[relPos(seat)]);
+// Balanced arrangements per player count (clockwise from me at the bottom centre).
+// Only occupied seats are placed, so a 3-handed table doesn't look like an 8-max table with holes.
+const LAYOUT_P = {
+  2: [[50, 88], [50, 11]],
+  3: [[50, 88], [17, 16], [83, 16]],
+  4: [[50, 88], [10.5, 58], [50, 11], [89.5, 58]],
+  5: [[50, 88], [11.5, 64], [19, 15], [81, 15], [88.5, 64]],
+  // 6+ players: the board/pot drop a little (table.dense) so the side seats get room above and below it
+  6: [[50, 88], [12, 72], [13, 30], [50, 11], [87, 30], [88, 72]],
+  7: [[50, 88], [13, 77], [9.5, 53.5], [21, 22], [79, 22], [90.5, 53.5], [87, 77]],
+  8: [[50, 88], [13, 77], [9, 54.5], [14, 30], [50, 11], [86, 30], [91, 54.5], [87, 77]],
+};
+const BETS_P = {
+  2: [[50, 73], [50, 25.5]],
+  3: [[50, 73], [20, 32], [80, 32]],
+  4: [[50, 73], [29, 51.5], [50, 25.5], [71, 51.5]],
+  5: [[50, 73], [31, 57], [19.5, 32], [80.5, 32], [69, 57]],
+  6: [[50, 73], [30, 65], [33, 43], [50, 25.5], [67, 43], [70, 65]],
+  7: [[50, 73], [31, 69.5], [30.5, 62.5], [31, 43], [69, 43], [69.5, 62.5], [69, 69.5]],
+  8: [[50, 73], [31, 69.5], [30.5, 62.5], [33, 43], [50, 25.5], [67, 43], [69.5, 62.5], [69, 69.5]],
+};
+const LAYOUT_L = {
+  2: [[50, 85], [50, 13.5]],
+  3: [[50, 85], [19, 22], [81, 22]],
+  4: [[50, 85], [8, 50], [50, 13.5], [92, 50]],
+  5: [[50, 85], [11, 68], [26, 17], [74, 17], [89, 68]],
+  6: [[50, 85], [14, 75], [13, 27], [50, 13.5], [87, 27], [86, 75]],
+  7: [[50, 85], [19, 80], [8, 47], [26, 16], [74, 16], [92, 47], [81, 80]],
+  8: POS_L,
+};
+let SLOT = new Map(); // seat -> { pos, bet }
+function computeLayout(v) {
+  const occ = v.seats.filter(Boolean).map((p) => p.seat);
+  const anchor = S.mySeat >= 0 && v.seats[S.mySeat] ? S.mySeat : (occ[0] ?? 0);
+  const rel = (s) => (s - anchor + MAX_SEATS) % MAX_SEATS;
+  occ.sort((a, b) => rel(a) - rel(b));
+  const n = Math.min(MAX_SEATS, Math.max(2, occ.length));
+  const pts = (landscape ? LAYOUT_L : LAYOUT_P)[n];
+  const bets = landscape ? null : BETS_P[n];
+  const dense = !landscape && n >= 6;
+  const t = $('#table');
+  t.classList.toggle('dense', dense);
+  t.classList.toggle('dense7', dense && n >= 7);
+  if (dense) POT_PT = [50, 38];
+  SLOT = new Map();
+  // landscape: bets slide toward the centre, except a top-centre seat whose chips sit beside its plate (keeps clear of the pot)
+  const lbet = (p) => (p[1] < 20 && Math.abs(p[0] - 50) < 15 ? [p[0] + 9.5, p[1] + 8] : toward(p, CENTER_PT, 0.38));
+  occ.forEach((seat, k) => SLOT.set(seat, { pos: pts[k], bet: bets ? bets[k] : lbet(pts[k]) }));
+  return `${landscape ? 'L' : 'P'}:${occ.join(',')}`;
+}
+const posOf = (seat) => (SLOT.get(seat) || { pos: (landscape ? POS_L : POS_P)[relPos(seat)] }).pos;
+const betPt = (seat) => { const s = SLOT.get(seat); return s ? s.bet : (landscape ? toward(posOf(seat), CENTER_PT, 0.38) : BET_P[relPos(seat)]); };
 function dealerPt(seat) {
   const p = posOf(seat);
   const [x, y] = toward(p, CENTER_PT, landscape ? 0.26 : 0.22);
   const dx = CENTER_PT[0] - p[0], dy = CENTER_PT[1] - p[1];
   const len = Math.hypot(dx, dy) || 1;
-  return [x - (dy / len) * (landscape ? 6 : 9), y + (dx / len) * 4];
+  const side = p[1] > 80 ? -1 : 1; // my own button sits on the left so it never hides under my action bubble
+  return [x - side * (dy / len) * (landscape ? 6 : side < 0 ? 11 : 9), y + (dx / len) * 4];
 }
 
 // ---- animation bookkeeping: an animation keeps running smoothly across re-renders ----
@@ -764,19 +815,19 @@ function renderSeats(v, isHost, win) {
   if (v.phase === 'handover' && v.result) for (const w of v.result.winners) winners.set(w.seat, w.amount);
   const betting = BETTING.includes(v.phase);
   const tw = $('#table').clientWidth, th = $('#table').clientHeight;
+  // remember where seats were, so they can glide to their new spots when the line-up changes
+  const prevLayout = S.layoutKey;
+  const oldPos = new Map();
+  const layoutKey = computeLayout(v);
+  if (prevLayout && prevLayout !== layoutKey) $('#seats').querySelectorAll('.seat[data-seat]').forEach((el) => oldPos.set(el.dataset.seat, [el.offsetLeft, el.offsetTop]));
+  S.layoutKey = layoutKey;
   let html = '';
   let dealOrder = 0;
   for (let i = 0; i < MAX_SEATS; i++) {
-    const [x, y] = posOf(i);
     const p = v.seats[i];
+    if (!p) continue; // empty seats are not drawn (host gets one "＋ 添加 AI" button instead)
+    const [x, y] = posOf(i);
     const side = seatSide(x, y);
-    if (!p) {
-      if (!isHost && v.seats.filter(Boolean).length >= 6) continue; // keep small screens tidy
-      html += `<div class="seat empty ${side} ${isHost ? 'can-add' : ''}" data-empty="${i}" style="left:${x}%;top:${y}%">
-        <div class="avatar-wrap"><div class="avatar">${isHost ? '＋' : ''}</div></div>
-        ${isHost ? '<div class="add-lbl">添加 AI</div>' : ''}</div>`;
-      continue;
-    }
     const me = i === S.mySeat;
     const active = v.toAct === i;
     const out = !p.inHand && p.chips === 0;
@@ -845,9 +896,22 @@ function renderSeats(v, isHost, win) {
     const [dx, dy] = dealerPt(v.button);
     html += `<div class="dealer" style="left:${dx}%;top:${dy}%">D</div>`;
   }
+  const nSeated = v.seats.filter(Boolean).length;
+  if (isHost && v.running && !betting && nSeated < MAX_SEATS) html += `<button class="add-ai-pill" id="add-ai">＋ 添加 AI</button>`;
   const seatsEl = $('#seats');
   seatsEl.innerHTML = html;
-  seatsEl.querySelectorAll('.seat.empty.can-add').forEach((el) => { el.onclick = () => { play('click'); S.ctrl.addBot(); }; });
+  const addAi = $('#add-ai'); if (addAi) addAi.onclick = (e) => { e.stopPropagation(); play('click'); haptic(8); S.ctrl.addBot(); };
+  if (oldPos.size && !reduceMotion()) {
+    seatsEl.querySelectorAll('.seat[data-seat]').forEach((el) => {
+      const o = oldPos.get(el.dataset.seat);
+      if (!o) { el.classList.add('arrive'); return; }
+      const dx = o[0] - el.offsetLeft, dy = o[1] - el.offsetTop;
+      if (!dx && !dy) return;
+      el.style.translate = `${dx}px ${dy}px`;
+      requestAnimationFrame(() => requestAnimationFrame(() => { el.classList.add('glide'); el.style.translate = '0px 0px'; }));
+      setTimeout(() => { el.classList.remove('glide'); el.style.translate = ''; }, 700);
+    });
+  }
   seatsEl.querySelectorAll('.seat[data-seat]').forEach((el) => { el.onclick = () => showSeatInfo(Number(el.dataset.seat)); });
   updateTimers();
 }
@@ -902,7 +966,7 @@ function renderCenter(v, isHost, win) {
       const ready = humans.filter((p) => isReady(p) && p.connected).length;
       const chips = v.seats.filter(Boolean).map((p) => { const av = avatarOf(p); return `<div class="wr-p ${p.connected ? '' : 'off'} ${p.isBot || isReady(p) ? 'ok' : ''}"><div class="avatar sm" style="--c1:${av.c1};--c2:${av.c2}">${av.t}</div><span>${esc(p.name)}</span><em>${p.isBot ? 'AI' : !p.connected ? '掉线' : isReady(p) ? '已准备' : '未准备'}</em></div>`; }).join('');
       msg += `<div class="waitroom"><div class="wr-title">${isHost ? '等待朋友加入' : '等待房主开始'} · <b>${ready}/${humans.length}</b> 已准备</div><div class="wr-list">${chips}</div>
-        ${isHost ? (eligible >= 2 ? `<button class="btn primary big-start" id="btn-start">▶ 开始游戏</button>` : '<div class="hint">至少需要 2 名玩家 · 点空位添加 AI 或邀请朋友</div>') : ''}</div>`;
+        ${isHost ? `<div class="wr-btns">${v.seats.filter(Boolean).length < MAX_SEATS ? '<button class="btn ghost-btn wr-add" id="wr-add">＋ 添加 AI</button>' : ''}${eligible >= 2 ? `<button class="btn primary big-start" id="btn-start">▶ 开始游戏</button>` : ''}</div>${eligible < 2 ? '<div class="hint">至少需要 2 名玩家 · 添加 AI 或邀请朋友</div>' : ''}` : ''}</div>`;
     } else if (!v.running) {
       msg += isHost && eligible >= 2 ? '<button class="btn primary big-start" id="btn-start">▶ 开始游戏</button>' : '<div class="hint">至少需要 2 名玩家</div>';
     } else if (eligible < 2) {
@@ -911,6 +975,7 @@ function renderCenter(v, isHost, win) {
   }
   const cm = $('#center-msg');
   if (cm.dataset.k !== msg) { cm.dataset.k = msg; cm.innerHTML = msg; }
+  const wa = $('#wr-add'); if (wa) wa.onclick = () => { play('click'); haptic(8); S.ctrl.addBot(); };
   const bs = $('#btn-start');
   if (bs) bs.onclick = () => { play('click'); S.ctrl.start(); };
 }

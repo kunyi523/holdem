@@ -5,7 +5,7 @@
 //    (see relay.js). Works on any network that can open https pages.
 // The host listens on both. A joining client tries direct first and starts the relay ~2.5 s later
 // (or immediately if direct errors); whichever opens first wins.
-import { relayHost, relayJoin, genKey, validKey } from './relay.js?v=5';
+import { relayHost, relayJoin, genKey, validKey } from './relay.js?v=6';
 
 const PREFIX = 'kunyi-holdem-v1-';
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';

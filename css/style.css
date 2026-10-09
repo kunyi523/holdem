@@ -681,3 +681,22 @@ input[type=range]::-moz-range-thumb { width: 26px; height: 26px; border-radius: 
   *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; transition-delay: 0s !important; }
   .seat.thinking .ring { animation: none; }
 }
+
+/* ===== v6: adaptive seat layouts ===== */
+.seat.glide { transition: translate .55s cubic-bezier(.3,.8,.3,1); }
+.seat.arrive { animation: seatIn .45s cubic-bezier(.2,.9,.3,1.2) both; }
+@keyframes seatIn { from { opacity: 0; scale: .6; } }
+.add-ai-pill { position: absolute; left: 3%; bottom: 2.5%; z-index: 6; padding: 6px 11px; border-radius: 14px; font: inherit; font-size: 12px; font-weight: 700;
+  color: rgba(255,231,166,.85); background: rgba(0,0,0,.35); border: 1px dashed rgba(245,196,81,.45); cursor: pointer; opacity: .75; transition: opacity .2s; }
+.add-ai-pill:hover, .add-ai-pill:focus-visible { opacity: 1; }
+.add-ai-pill:active { transform: scale(.94); }
+.wr-btns { display: flex; gap: 8px; align-items: center; justify-content: center; flex-wrap: wrap; }
+.wr-add { padding: 10px 14px; font-size: 14px; border: 1px dashed rgba(245,196,81,.5); background: rgba(0,0,0,.25); color: var(--gold-soft); }
+@media (prefers-reduced-motion: reduce) { .seat.arrive { animation: none; } .seat.glide { transition: none; } }
+
+/* v6: crowded portrait tables (6+) — board and pot sit lower, seats a touch smaller */
+#table.dense:not(.landscape) #center { top: 53%; }
+#table.dense:not(.landscape) .pot { top: 38%; }
+#table.dense:not(.landscape) .felt-logo { top: 71%; }
+#table.dense:not(.landscape) { --board-w: clamp(34px, 9.6vw, 52px); }
+#table.dense7:not(.landscape) { --seat-w: 70px; --av: 36px; }

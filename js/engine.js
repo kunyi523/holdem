@@ -1,8 +1,8 @@
 // Authoritative No-Limit Texas Hold'em engine (runs on the host / in single-player).
-import { newDeck, shuffle, cryptoRandInt } from './cards.js?v=5';
-import { evaluate, describeScore } from './evaluator.js?v=5';
-import { computePots, splitPot } from './pots.js?v=5';
-import { updateTilt } from './bot.js?v=5';
+import { newDeck, shuffle, cryptoRandInt } from './cards.js?v=6';
+import { evaluate, describeScore } from './evaluator.js?v=6';
+import { computePots, splitPot } from './pots.js?v=6';
+import { updateTilt } from './bot.js?v=6';
 
 export const STARTING_CHIPS = 100000;
 export const MAX_SEATS = 8;
